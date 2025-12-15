@@ -1,0 +1,20 @@
+scene_objects_Qwen2.5-VL-7B-Instruct
+scannetppv2
+PGSR
+# samsam_masks_*
+assets
+agent_output
+*.ply
+DptV3
+Dataset--spatialverse-InteriorGS
+output_*
+sam_masks_*
+sam_masks
+sam_vis_debug_new
+scene_canonical_objects_Qwen3-VL-30B-A3B-Instruct
+scene_objects_Qwen3-VL-30B-A3B-Instruct
+*.png
+output
+ckpt_scannetppv2
+sam_masks/*
+sam3/train/*

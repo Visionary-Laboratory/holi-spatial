@@ -1,0 +1,66 @@
+{
+    // 使用 IntelliSense 了解相关属性。 
+    // 悬停以查看现有属性的描述。
+    // 欲了解更多信息，请访问: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Python 调试当前文件",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${file}",
+            "console": "integratedTerminal",
+            "env": {"CUDA_VISIBLE_DEVICES": "0"},
+        },
+        {
+            "name": "Python 调试程序: classic.py",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "classic.py",
+            "console": "integratedTerminal",
+            "env": {"CUDA_VISIBLE_DEVICES": "1"},
+        },
+        {
+            "name": "Python 调试程序: agent.py",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "agent.py",
+            "console": "integratedTerminal",
+            "args": [
+            // "--prompt","pipe"
+
+        ]
+        },
+        {
+            "name": "Debug: get_gaussian_indices_from_mask",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "3d_bounding_instence_gs.py",
+            "console": "integratedTerminal",
+            // "args": [
+            //     "--mask_json",
+            //     "618f6e739ea5fdc212fbdfe18568d9de8811636d2d6a6db2046a231893e5712f/floor/frame_00001_floor_agent_gemini-3-pro-preview-thinking_pred.json",
+            //     "--cam_dir",
+            //     "618f6e739ea5fdc212fbdfe18568d9de8811636d2d6a6db2046a231893e5712f/dense/cam",
+            //     "--ply",
+            //     "618f6e739ea5fdc212fbdfe18568d9de8811636d2d6a6db2046a231893e5712f/run_0000/point_cloud/iteration_30000/point_cloud_rk0_ws1.ply"
+            // ]
+        },
+        {
+            "name": "Debug: train 0a5c013435",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "PGSR/train.py",
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}",
+            "env": {"CUDA_VISIBLE_DEVICES": "0"},
+            "args": [
+                "-s", "scannetppv2/data/0a5c013435/dslr/nerfstudio",
+                "-i", "scannetppv2/data/0a5c013435/dslr/resized_undistorted_images",
+                "--ply_path", "DptV3/data/0a5c013435/pointcloud_da3.ply",
+                "-m", "output/0a5c013435",
+                "--resolution", "1"
+            ]
+        }
+    ]
+}
