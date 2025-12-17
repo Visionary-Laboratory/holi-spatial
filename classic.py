@@ -42,8 +42,19 @@ def discover_scenes(data_root: Path, scene_names: Sequence[str] | None) -> List[
     if scene_names:
         return [data_root / name for name in scene_names]
     scenes: List[Path] = []
+    
+    # 根据 data_root 名称判断使用哪个路径
+    data_root_str = str(data_root)
+    if "scannetppv2" in data_root_str:
+        image_path = "dslr/resized_undistorted_images"
+    elif "DL3DV" in data_root_str:
+        image_path = "dense/rgb"
+    else:
+        # 默认使用 scannetppv2 的路径
+        image_path = "dslr/resized_undistorted_images"
+    
     for scene_dir in data_root.iterdir():
-        if scene_dir.is_dir() and (scene_dir / "dslr"/"resized_undistorted_images").exists():
+        if scene_dir.is_dir() and (scene_dir / image_path).exists():
             scenes.append(scene_dir)
     return scenes
 
@@ -170,8 +181,18 @@ def process_scene(
     processor,
     max_images: int,
     output_dir: Path,
+    data_root: Path,
 ) -> None:
-    image_root = scene_dir / "dslr/resized_undistorted_images"
+    # 根据 data_root 名称判断使用哪个路径
+    data_root_str = str(data_root)
+    if "scannetppv2" in data_root_str:
+        image_root = scene_dir / "dslr/resized_undistorted_images"
+    elif "DL3DV" in data_root_str:
+        image_root = scene_dir / "dense/rgb"
+    else:
+        # 默认使用 scannetppv2 的路径
+        image_root = scene_dir / "dslr/resized_undistorted_images"
+    
     images = collect_images(image_root, max_images)
     if not images:
         logging.warning("场景 %s 无可用图片，跳过。", scene_dir.name)
@@ -237,7 +258,7 @@ def main() -> None:
 
     model, processor = load_model(args.model_path)
     for scene_dir in tqdm(scenes):
-        process_scene(scene_dir, model, processor, args.max_images, output_dir)
+        process_scene(scene_dir, model, processor, args.max_images, output_dir, data_root)
 
 
 if __name__ == "__main__":

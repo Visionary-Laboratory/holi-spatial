@@ -18,3 +18,9 @@ output
 ckpt_scannetppv2
 sam_masks/*
 sam3/train/*
+class_dl3dv
+class_dl3dv_agent
+class_dl3dv_agent_vis
+mask_dl3dv
+sam_dl3dv
+scene_objects_dl3dv/0a6c01ac3212768772f8f6eca86314c72d5ca320c3e3def148ddaceab23c07f4.json

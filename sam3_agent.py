@@ -35,7 +35,8 @@ def call_sam_service(
         # 1. Prepare the response dictionary
         serialized_response = remove_overlapping_masks(serialized_response)
         serialized_response = {
-            "original_image_path": image_path,
+            # 存绝对路径，避免可视化阶段找不到文件
+            "original_image_path": os.path.abspath(image_path),
             "output_image_path": output_image_path,
             **serialized_response,
         }

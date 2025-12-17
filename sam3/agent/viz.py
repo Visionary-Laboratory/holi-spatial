@@ -45,10 +45,11 @@ def visualize(
         ]
         binary_masks = [mask_utils.decode(rle) for rle in rle_masks]
 
-        img_bgr = cv2.imread(img_path)
-        if img_bgr is None:
-            raise FileNotFoundError(f"Could not read image: {img_path}")
-        img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+        try:
+            # 使用 PIL 读取，避免某些环境下 cv2.imread 返回 None
+            img_rgb = np.array(Image.open(img_path).convert("RGB"))
+        except Exception as exc:  # pylint: disable=broad-except
+            raise FileNotFoundError(f"Could not read image: {img_path}") from exc
 
         viz = Visualizer(
             img_rgb,
@@ -91,10 +92,10 @@ def visualize(
         rle_i = {"size": (orig_h, orig_w), "counts": input_json["pred_masks"][idx]}
         bin_i = mask_utils.decode(rle_i)
 
-        img_bgr_i = cv2.imread(img_path)
-        if img_bgr_i is None:
-            raise FileNotFoundError(f"Could not read image: {img_path}")
-        img_rgb_i = cv2.cvtColor(img_bgr_i, cv2.COLOR_BGR2RGB)
+        try:
+            img_rgb_i = np.array(Image.open(img_path).convert("RGB"))
+        except Exception as exc:  # pylint: disable=broad-except
+            raise FileNotFoundError(f"Could not read image: {img_path}") from exc
 
         viz_i = Visualizer(
             img_rgb_i,

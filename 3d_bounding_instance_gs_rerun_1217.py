@@ -14,8 +14,6 @@ import torch
 from PIL import Image
 from skimage import morphology
 from tqdm import tqdm
-import trimesh
-from scipy.spatial.transform import Rotation as R
 
 PGSR_ROOT = Path(__file__).parent / "PGSR"
 if str(PGSR_ROOT) not in sys.path:
@@ -164,106 +162,44 @@ def mask_depth_to_points(
     return world_pts.astype(np.float32)
 
 
-def compute_obb(pts: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
-    """计算 OBB（定向包围盒），返回 (transform, extents)。
-    
-    Returns:
-        transform: 4x4 变换矩阵（从 OBB 局部坐标系到世界坐标系）
-        extents: (3,) OBB 的尺寸
-    """
-    if pts.shape[0] < 3:
-        raise ValueError(f"OBB 计算至少需要 3 个点，当前: {pts.shape[0]}")
-
-    T, extents = trimesh.bounds.oriented_bounds(pts)
-    # oriented_bounds 返回的是“将点变到 OBB 局部坐标系”的矩阵，需要取逆才能作为 box 的 world transform
-    T = np.linalg.inv(T).astype(np.float32)
-    extents = extents.astype(np.float32)
-    return T, extents
-
-
-def obb_corners(transform: np.ndarray, extents: np.ndarray) -> np.ndarray:
-    """计算 OBB 的 8 个角点（世界坐标）。
-    
-    Args:
-        transform: 4x4 变换矩阵
-        extents: (3,) OBB 尺寸
-    
-    Returns:
-        corners: (8, 3) 8 个角点的世界坐标
-    """
-    # OBB 局部坐标系的 8 个角点
-    half = extents * 0.5
-    local_corners = np.array([
-        [-half[0], -half[1], -half[2]],
-        [-half[0], -half[1],  half[2]],
-        [-half[0],  half[1], -half[2]],
-        [-half[0],  half[1],  half[2]],
-        [ half[0], -half[1], -half[2]],
-        [ half[0], -half[1],  half[2]],
-        [ half[0],  half[1], -half[2]],
-        [ half[0],  half[1],  half[2]],
-    ], dtype=np.float32)
-    
-    # 变换到世界坐标
-    ones = np.ones((8, 1), dtype=np.float32)
-    local_corners_homo = np.concatenate([local_corners, ones], axis=1)
-    world_corners = (local_corners_homo @ transform.T)[:, :3]
-    return world_corners
-
-
-def bbox_corners_from_obb(transform: np.ndarray, extents: np.ndarray) -> List[Dict[str, float]]:
-    """将 OBB (transform, extents) 转成 8 个角点的 JSON 格式。"""
-    corners = obb_corners(transform, extents)
+def bbox_corners(pts: np.ndarray) -> List[Dict[str, float]]:
+    xyz_min = pts.min(axis=0)
+    xyz_max = pts.max(axis=0)
+    x0, y0, z0 = xyz_min.tolist()
+    x1, y1, z1 = xyz_max.tolist()
+    corners = [
+        (x0, y0, z0),
+        (x0, y1, z0),
+        (x1, y1, z0),
+        (x1, y0, z0),
+        (x0, y0, z1),
+        (x0, y1, z1),
+        (x1, y1, z1),
+        (x1, y0, z1),
+    ]
     return [{"x": float(x), "y": float(y), "z": float(z)} for x, y, z in corners]
 
 
-def obb_overlap(
-    transform_a: np.ndarray,
-    extents_a: np.ndarray,
-    transform_b: np.ndarray,
-    extents_b: np.ndarray,
-    intersect_ratio: float = 0.25,
-) -> bool:
-    """计算两个 OBB 的交叠体积，判断是否重叠。
-    
-    Args:
-        transform_a: 4x4 变换矩阵
-        extents_a: (3,) OBB 尺寸
-        transform_b: 4x4 变换矩阵
-        extents_b: (3,) OBB 尺寸
-        intersect_ratio: 交叠体积占较小盒体积的最小比例
-    
-    Returns:
-        是否重叠
-    """
-    obb_a = trimesh.creation.box(extents=extents_a, transform=transform_a)
-    obb_b = trimesh.creation.box(extents=extents_b, transform=transform_b)
-    inter = obb_a.intersection(obb_b)
+def bbox_min_max(pts: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    return pts.min(axis=0), pts.max(axis=0)
 
-    vol_inter = inter.volume if inter.is_volume else 0.0
-    if vol_inter <= 0:
+
+def bbox_overlap(bmin_a: np.ndarray, bmax_a: np.ndarray, bmin_b: np.ndarray, bmax_b: np.ndarray, intersect_ratio: float = 0.25) -> bool:
+    """交叠体积占较小盒体积的比例 > 20% 才算 overlap。"""
+    inter_min = np.maximum(bmin_a, bmin_b)
+    inter_max = np.minimum(bmax_a, bmax_b)
+    inter_size = np.maximum(0.0, inter_max - inter_min)
+    inter_vol = inter_size.prod()
+    if inter_vol <= 0:
         return False
-
-    vol_a = float(np.prod(extents_a))
-    vol_b = float(np.prod(extents_b))
+    vol_a = np.maximum(0.0, (bmax_a - bmin_a)).prod()
+    vol_b = np.maximum(0.0, (bmax_b - bmin_b)).prod()
     min_vol = max(1e-9, min(vol_a, vol_b))
-    return vol_inter / min_vol >= intersect_ratio
+    return inter_vol / min_vol >= intersect_ratio
 
 
-def obb_contains(
-    transform_a: np.ndarray,
-    extents_a: np.ndarray,
-    transform_b: np.ndarray,
-    extents_b: np.ndarray,
-) -> bool:
-    """判断 OBB A 是否包含 OBB B：B 的 8 个角点都落在 A 的局部盒内。"""
-    corners_b = obb_corners(transform_b, extents_b)
-    T_a_inv = np.linalg.inv(transform_a)
-    ones = np.ones((8, 1), dtype=np.float32)
-    corners_b_homo = np.concatenate([corners_b, ones], axis=1)
-    corners_b_local = (corners_b_homo @ T_a_inv.T)[:, :3]
-    half_a = extents_a * 0.5
-    return np.all(np.abs(corners_b_local) <= half_a + 1e-6)
+def bbox_contains(bmin_a: np.ndarray, bmax_a: np.ndarray, bmin_b: np.ndarray, bmax_b: np.ndarray) -> bool:
+    return np.all(bmin_a <= bmin_b) and np.all(bmax_a >= bmax_b)
 
 
 def filter_outliers(points: np.ndarray, z_thresh: float = 3.5) -> np.ndarray:
@@ -419,24 +355,26 @@ def export_pointcloud_and_bboxes(
     for idx, box in enumerate(bboxes):
         if include_labels is not None and box["label"] not in include_labels:
             continue
-        col = label_color(box["label"])
-
-        transform = np.array(box["obb_transform"], dtype=np.float32)
-        extents = np.array(box["obb_extents"], dtype=np.float32)
-        mesh_box = trimesh.creation.box(extents=extents, transform=transform)
-        
+        corners = np.array([[c["x"], c["y"], c["z"]] for c in box["bounding_box"]], dtype=np.float32)
+        xyz_min = corners.min(axis=0)
+        xyz_max = corners.max(axis=0)
+        extents = xyz_max - xyz_min
+        center = (xyz_min + xyz_max) * 0.5
         # 线框 bbox
+        mesh_box = trimesh.creation.box(extents=extents)
+        mesh_box.apply_translation(center)
         edges = mesh_box.edges_unique
         edge_verts = mesh_box.vertices[edges]
         path = trimesh.load_path(edge_verts.reshape(-1, 3))
+        col = label_color(box["label"])
         path.colors = np.tile(col[None, :], (len(path.entities), 1))
         path.metadata = {"label": box["label"]}
         scene_tm.add_geometry(path, node_name=f"bbox_{idx+1}_{box['label']}")
 
         # 小球标记中心，便于在查看器里看到标签颜色
         try:
-            sph = trimesh.creation.icosphere(subdivisions=2, radius=float(max(extents)) * 0.01)
-            sph.apply_translation(transform[:3, 3])
+            sph = trimesh.creation.icosphere(subdivisions=2, radius=max(extents) * 0.01)
+            sph.apply_translation(center)
             sph.visual.vertex_colors = np.tile(col[None, :], (len(sph.vertices), 1))
             sph.metadata = {"label": box["label"]}
             scene_tm.add_geometry(sph, node_name=f"bbox_center_{idx+1}_{box['label']}")
@@ -505,18 +443,17 @@ def log_rerun_scene(
             continue
         ins_id = box["ins_id"]
         label = box["label"]
+        corners = np.array([[c["x"], c["y"], c["z"]] for c in box["bounding_box"]], dtype=np.float32)
+        xyz_min = corners.min(axis=0)
+        xyz_max = corners.max(axis=0)
+        center = (xyz_min + xyz_max) * 0.5
+        half_size = (xyz_max - xyz_min) * 0.5
         col = label_color(label)[:3]
-
-        transform = np.array(box["obb_transform"], dtype=np.float32)
-        extents = np.array(box["obb_extents"], dtype=np.float32)
-        center = transform[:3, 3]
-        quat_xyzw = R.from_matrix(transform[:3, :3]).as_quat().astype(np.float32)  # xyzw
         rr.log(
             f"instances/{label}/{ins_id}/bbox",
             rr.Boxes3D(
                 centers=np.array([center], dtype=np.float32),
-                half_sizes=np.array([extents * 0.5], dtype=np.float32),
-                quaternions=[rr.Quaternion(xyzw=quat_xyzw)],
+                half_sizes=np.array([half_size], dtype=np.float32),
                 colors=np.array([col], dtype=np.uint8),
                 labels=[f"{label}:{ins_id}"],
             ),
@@ -641,64 +578,50 @@ def process_scene(
             if points.shape[0] < min_points:
                 continue
 
-            # 计算 OBB
-            transform, extents = compute_obb(points)
+            bmin, bmax = bbox_min_max(points)
             new_inst = {
                 "points": [points],
-                "obb_transform": transform,
-                "obb_extents": extents,
+                "bbox_min": bmin,
+                "bbox_max": bmax,
                 "images": {str(mask_path)},
             }
 
             merge_indices = []
             for idx, inst in enumerate(instances):
-                overlap = obb_overlap(
-                    inst["obb_transform"],
-                    inst["obb_extents"],
-                    transform,
-                    extents,
+                overlap = bbox_overlap(inst["bbox_min"], inst["bbox_max"], bmin, bmax)
+                contain = bbox_contains(inst["bbox_min"], inst["bbox_max"], bmin, bmax) or bbox_contains(
+                    bmin, bmax, inst["bbox_min"], inst["bbox_max"]
                 )
-                # contain = obb_contains(
-                #     inst["obb_transform"],
-                #     inst["obb_extents"],
-                #     transform,
-                #     extents,
-                # ) or obb_contains(
-                #     transform,
-                #     extents,
-                #     inst["obb_transform"],
-                #     inst["obb_extents"],
-                # )
-                # if overlap or contain:
-                if overlap:
+                # if contain == True:
+                #     print(mask_path)
+                if overlap or contain:
                     merge_indices.append(idx)
+                # if len(merge_indices)>1:
+                #     print(mask_path)
 
             if not merge_indices:
                 instances.append(new_inst)
             else:
                 merged = new_inst
                 for idx in sorted(merge_indices, reverse=True):
-                    inst = instances.pop(idx)
+                    inst = instances.pop(idx)  # 这里有问题，pop之后，idx之后的元素会往前移动，导致idx之后的元素的索引会变化，导致合并错误
                     merged["points"].extend(inst["points"])
+                    merged["bbox_min"] = np.minimum(merged["bbox_min"], inst["bbox_min"])
+                    merged["bbox_max"] = np.maximum(merged["bbox_max"], inst["bbox_max"])
                     merged["images"] |= inst["images"]
-                # 重新计算合并后的 OBB
                 all_pts = np.concatenate(merged["points"], axis=0)
-                merged["obb_transform"], merged["obb_extents"] = compute_obb(all_pts)
+                merged["bbox_min"], merged["bbox_max"] = bbox_min_max(all_pts)
                 instances.append(merged)
 
         logging.info("标签 %s 合并得到 %d 个实例", label, len(instances))
         for inst in instances:
             pts = np.concatenate(inst["points"], axis=0)
-            transform = inst["obb_transform"]
-            extents = inst["obb_extents"]
-            bbox = bbox_corners_from_obb(transform, extents)
+            bbox = bbox_corners(pts)
             results.append(
                 {
                     "ins_id": str(inst_counter),
                     "label": label,
-                    "bounding_box": bbox,  # 8 个角点
-                    "obb_transform": transform.tolist(),  # 4x4 矩阵
-                    "obb_extents": extents.tolist(),  # (3,) 尺寸
+                    "bounding_box": bbox,
                     "images": sorted(inst["images"]),
                 }
             )

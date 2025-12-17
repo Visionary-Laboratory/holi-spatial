@@ -177,13 +177,22 @@ def process_scene(
     output_dir: Path,
 ) -> Path:
     scene_name, per_image = load_scene_json(scene_json)
-    image_root = data_root / scene_name / "dslr" / "resized_undistorted_images"
+
+    data_root_str = str(data_root)
+    if "scannetppv2" in data_root_str:
+        image_root = data_root / scene_name / "dslr" / "resized_undistorted_images"
+    elif "DL3DV" in data_root_str:
+        image_root = data_root / scene_name / "dense" / "rgb"
+    else:
+        # 默认使用 scannetppv2 的路径
+        image_root = data_root / scene_name / "dslr" / "resized_undistorted_images"
+    # image_root = data_root / scene_name / "dslr" / "resized_undistorted_images"
 
     if not image_root.exists():
         raise FileNotFoundError(f"找不到图片目录: {image_root}")
 
     logging.info("加载模型...")
-    model = build_sam3_image_model()
+    model = build_sam3_image_model(checkpoint_path="/mnt/shared-storage-user/solution/huggingface/hub/models--facebook--sam3/snapshots/2afe64078f4420bdfbc063162d1336003efadc81/sam3.pt")
     processor = Sam3Processor(model, confidence_threshold=0.5)
 
     all_results: List[Dict] = []

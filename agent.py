@@ -29,7 +29,7 @@ from sam3.agent.viz import visualize
 # 默认使用单卡
 # os.environ.setdefault("CUDA_VISIBLE_DEVICES", "0")
 
-DEFAULT_MODEL_PATH = "/mnt/shared-storage-user/intern7shared/share_ckpt_hf/models--Qwen--Qwen3-VL-30B-A3B-Instruct/snapshots/4b184fbdab8886057d8d80c09f35bcfc65fe640e"
+DEFAULT_MODEL_PATH = "/mnt/shared-storage-user/intern7shared/share_ckpt_hf/models--Qwen--Qwen3-VL-30B-A3B-Thinking/snapshots/7e9bbfa2c1b2059edd18160793fd421194da2c10"
 DEFAULT_DATA_ROOT = Path("/home/liuyifei/code/posevlm/scannetppv2/data")
 DEFAULT_SCENE_JSON = Path("scene_objects_Qwen3-VL-30B-A3B-Instruct/0a5c013435.json")
 DEFAULT_SAM_OUTPUT_DIR = Path("sam_vis_debug_new")
@@ -81,7 +81,8 @@ def prepare_sam_response(
     raw_output = remove_overlapping_masks(raw_output)
 
     serialized: dict = {
-        "original_image_path": str(image_path),
+        # 绝对路径避免在不同工作目录下读取失败
+        "original_image_path": str(image_path.resolve()),
         "orig_img_h": raw_output.get("orig_img_h"),
         "orig_img_w": raw_output.get("orig_img_w"),
         "pred_boxes": raw_output.get("pred_boxes", []),
@@ -208,17 +209,21 @@ def save_masks(
     approved_indices: Sequence[int],
     mask_output_dir: Path,
     scene_name: str,
+    image_name: str,
     image_stem: str,
     category: str,
-) -> List[Path]:
+) -> tuple[List[Path], List[Dict]]:
     if not approved_indices:
-        return []
+        return [], []
 
     pred_masks = serialized.get("pred_masks", [])
+    pred_boxes = serialized.get("pred_boxes", []) or []
+    pred_scores = serialized.get("pred_scores", []) or []
     h = int(serialized["orig_img_h"])
     w = int(serialized["orig_img_w"])
 
     saved_paths: List[Path] = []
+    records: List[Dict] = []
     for idx in approved_indices:
         zero_idx = idx - 1
         if zero_idx < 0 or zero_idx >= len(pred_masks):
@@ -247,7 +252,17 @@ def save_masks(
         output_path.parent.mkdir(parents=True, exist_ok=True)
         Image.fromarray(binary_mask).save(output_path)
         saved_paths.append(output_path)
-    return saved_paths
+        records.append(
+            {
+                "image": image_name,
+                "label": category,
+                "mask_path": str(output_path),
+                "bbox": pred_boxes[zero_idx] if zero_idx < len(pred_boxes) else None,
+                "score": pred_scores[zero_idx] if zero_idx < len(pred_scores) else None,
+                "mask_index": idx,
+            }
+        )
+    return saved_paths, records
 
 
 def process_scene(
@@ -262,7 +277,16 @@ def process_scene(
     image_limit: int | None = None,
     category_limit: int | None = None,
 ) -> None:
-    image_root = data_root / scene_name / "dslr" / "resized_undistorted_images"
+    data_root = data_root.expanduser().resolve()
+    data_root_str = str(data_root)
+    if "scannetppv2" in data_root_str:
+        image_root = data_root / scene_name / "dslr" / "resized_undistorted_images"
+    elif "dl3dv" in data_root_str:
+        image_root = data_root / scene_name / "dense" / "rgb"
+    else:
+        # 默认使用 scannetppv2 的路径
+        image_root = data_root / scene_name / "dslr" / "resized_undistorted_images"
+    # image_root = data_root / scene_name / "dslr" / "resized_undistorted_images"
     if not image_root.exists():
         raise FileNotFoundError(f"找不到图片目录: {image_root}")
 
@@ -270,10 +294,14 @@ def process_scene(
     if image_limit:
         items = items[:image_limit]
 
+    all_records: List[Dict] = []
+    missing_images: List[str] = []
+
     for image_idx, (image_name, categories) in enumerate(tqdm(items, desc="处理图片")):
         image_path = image_root / image_name
         if not image_path.exists():
             logging.warning("图片不存在，跳过: %s", image_path)
+            missing_images.append(image_name)
             continue
 
         logging.info("(%d/%d) 处理图片 %s", image_idx + 1, len(items), image_name)
@@ -291,20 +319,37 @@ def process_scene(
             approved = ask_vlm_for_indices(
                 vlm_model, vlm_processor, image_path, overlay_image_path, category
             )
-            saved_paths = save_masks(
+            saved_paths, records = save_masks(
                 sam_result,
                 approved,
                 mask_output_dir,
                 scene_name,
+                image_name,
                 image_path.stem,
                 category,
             )
+            all_records.extend(records)
             logging.info(
                 "类别 %s 保存掩码 %d 个，路径示例: %s",
                 category,
                 len(saved_paths),
                 saved_paths[0] if saved_paths else "无",
             )
+
+    # 保存索引
+    mask_root = mask_output_dir / scene_name
+    index_path = mask_root / "mask_index.json"
+    index = {
+        "scene": scene_name,
+        "image_root": str(image_root),
+        "mask_root": str(mask_root),
+        "items": all_records,
+        "missing_images": missing_images,
+    }
+    index_path.parent.mkdir(parents=True, exist_ok=True)
+    with index_path.open("w", encoding="utf-8") as f:
+        json.dump(index, f, ensure_ascii=False, indent=2)
+    logging.info("mask 索引已保存到 %s，总计 %d 个 mask，缺失图片 %d", index_path, len(all_records), len(missing_images))
 
 
 def parse_args() -> argparse.Namespace:
@@ -324,6 +369,8 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     setup_logger()
     args = parse_args()
+    # 使用绝对路径，避免相对路径在子进程/不同工作目录下读取失败
+    args.data_root = args.data_root.expanduser().resolve()
 
     scene_name, per_image = load_scene_config(args.scene_json)
     sam_model = build_sam3_image_model(checkpoint_path="/mnt/shared-storage-user/solution/huggingface/hub/models--facebook--sam3/snapshots/2afe64078f4420bdfbc063162d1336003efadc81/sam3.pt")
