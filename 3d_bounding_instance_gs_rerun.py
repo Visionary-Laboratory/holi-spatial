@@ -267,18 +267,25 @@ def obb_contains(
 
 
 def filter_outliers(points: np.ndarray, z_thresh: float = 3.5) -> np.ndarray:
-    """用中位数+MAD 过滤飞点，避免极值拉大包围盒。"""
+    """
+    用中位数+MAD 计算逐轴 Z 分数，删除 |Z| 最大的 10% 点。
+    这样不依赖固定阈值，按比例裁掉尾部离群。
+    """
     if points.shape[0] < 5:
         return points
-    center = np.median(points, axis=0)
-    dist = np.linalg.norm(points - center, axis=1)
-    med = np.median(dist)
-    mad = np.median(np.abs(dist - med))
-    if mad < 1e-6:
+    med = np.median(points, axis=0)  # (3,)
+    mad = np.median(np.abs(points - med), axis=0)  # (3,)
+    mad[mad < 1e-6] = 1e-6  # 避免除零
+    z = 0.6745 * (points - med) / mad  # (N,3)
+    # 依据每个点的最大 |z| 进行排序，删除最靠后的 10%
+    max_abs_z = np.abs(z).max(axis=1)  # (N,)
+    n = points.shape[0]
+    drop = int(max(1, round(n * 0.10)))
+    if drop <= 0 or n - drop < 1:
         return points
-    z = 0.6745 * (dist - med) / mad
-    keep = np.abs(z) <= z_thresh
-    return points[keep]
+    # 获取需要保留的索引（按 max_abs_z 升序保留前 n-drop 个）
+    keep_idx = np.argsort(max_abs_z)[: n - drop]
+    return points[keep_idx]
 
 
 def erode_mask(mask: np.ndarray, pixels: int) -> np.ndarray:
@@ -592,6 +599,12 @@ def process_scene(
     with mask_index_path.open("r", encoding="utf-8") as f:
         mask_index = json.load(f)
     items = mask_index.get("items", [])
+    mask_score_map: Dict[str, float] = {}
+    for it in items:
+        path = it.get("mask_path")
+        score = it.get("score")
+        if isinstance(path, str) and isinstance(score, (int, float)):
+            mask_score_map[path] = float(score)
 
     results: List[Dict] = []
     inst_counter = 1
@@ -623,7 +636,11 @@ def process_scene(
         for item in tqdm(label_items, desc=f"Processing {label}"):
             image_name = item["image"]
             mask_path = Path(item["mask_path"])
+            # if mask_score_map.get(item["mask_path"]) <= 0.75 :
+            #     continue
+
             stem = Path(image_name).stem
+
 
             if stem not in intr_map or stem not in c2w_map:
                 logging.warning("找不到相机参数，跳过: %s", image_name)
@@ -650,6 +667,10 @@ def process_scene(
                 "images": {str(mask_path)},
             }
 
+            # 判断是否与已有实例合并
+            def share_same_frame(img_a: str, img_b: str) -> bool:
+                return Path(img_a).parent.name == Path(img_b).parent.name
+
             merge_indices = []
             for idx, inst in enumerate(instances):
                 overlap = obb_overlap(
@@ -658,19 +679,11 @@ def process_scene(
                     transform,
                     extents,
                 )
-                # contain = obb_contains(
-                #     inst["obb_transform"],
-                #     inst["obb_extents"],
-                #     transform,
-                #     extents,
-                # ) or obb_contains(
-                #     transform,
-                #     extents,
-                #     inst["obb_transform"],
-                #     inst["obb_extents"],
-                # )
-                # if overlap or contain:
-                if overlap:
+                same_frame = any(
+                    share_same_frame(img, next(iter(new_inst["images"])))
+                    for img in inst["images"]
+                )
+                if overlap and not same_frame:
                     merge_indices.append(idx)
 
             if not merge_indices:
@@ -683,11 +696,19 @@ def process_scene(
                     merged["images"] |= inst["images"]
                 # 重新计算合并后的 OBB
                 all_pts = np.concatenate(merged["points"], axis=0)
+                if instance_max_points > 0 and all_pts.shape[0] > instance_max_points:
+                    orig_n = all_pts.shape[0]
+                    idx = np.random.choice(orig_n, instance_max_points, replace=False)
+                    all_pts = all_pts[idx]
+                    logging.info("实例合并点云下采样: %d -> %d", orig_n, all_pts.shape[0])
                 merged["obb_transform"], merged["obb_extents"] = compute_obb(all_pts)
                 instances.append(merged)
 
         logging.info("标签 %s 合并得到 %d 个实例", label, len(instances))
         for inst in instances:
+            # 至少有一张 mask 的得分 >= 0.85 才保留该实例
+            if not any((mask_score_map.get(img) or 0.0) >= 0.9 for img in inst["images"]):
+                continue
             pts = np.concatenate(inst["points"], axis=0)
             transform = inst["obb_transform"]
             extents = inst["obb_extents"]
@@ -769,7 +790,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR, help="输出 3D bbox 保存目录")
     parser.add_argument("--voxel-size", type=float, default=0.005, help="（保留参数，未使用）")
     parser.add_argument("--min-points", type=int, default=30, help="实例最少点数过滤")
-    parser.add_argument("--erode-pixels", type=int, default=20, help="mask 形态学腐蚀像素，过滤边缘")
+    parser.add_argument("--erode-pixels", type=int, default=15, help="mask 形态学腐蚀像素，过滤边缘")
     parser.add_argument(
         "--instance-max-points",
         type=int,

@@ -349,6 +349,13 @@ def process_scene(
     with mask_index_path.open("r", encoding="utf-8") as f:
         mask_index = json.load(f)
     items = mask_index.get("items", [])
+    # 建立 mask 路径 -> 分数 的索引，便于后续过滤
+    mask_score_map: Dict[str, float] = {}
+    for it in items:
+        path = it.get("mask_path")
+        score = it.get("score")
+        if isinstance(path, str) and isinstance(score, (int, float)):
+            mask_score_map[path] = float(score)
 
     results: List[Dict] = []
     box_image: List[Dict] = []
@@ -433,6 +440,12 @@ def process_scene(
 
         logging.info("标签 %s 合并得到 %d 个实例", label, len(instances))
         for inst in instances:
+            # 过滤：实例至少有一张 mask 分数 >= 0.85，否则丢弃
+            if not any(
+                (mask_score_map.get(img_path) or 0.0) >= 0.85
+                for img_path in inst["images"]
+            ):
+                continue
             pts = np.concatenate(inst["points"], axis=0)
             bbox = bbox_corners(pts)
             results.append(

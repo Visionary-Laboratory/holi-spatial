@@ -44,19 +44,22 @@
         ]
         },
         {
-            "name": "Debug: get_gaussian_indices_from_mask",
+            "name": "Debug: filter",
             "type": "debugpy",
             "request": "launch",
-            "program": "3d_bounding_instence_gs.py",
+            "program": "3d_bounding_score_filter.py",
             "console": "integratedTerminal",
-            // "args": [
-            //     "--mask_json",
-            //     "618f6e739ea5fdc212fbdfe18568d9de8811636d2d6a6db2046a231893e5712f/floor/frame_00001_floor_agent_gemini-3-pro-preview-thinking_pred.json",
-            //     "--cam_dir",
-            //     "618f6e739ea5fdc212fbdfe18568d9de8811636d2d6a6db2046a231893e5712f/dense/cam",
-            //     "--ply",
-            //     "618f6e739ea5fdc212fbdfe18568d9de8811636d2d6a6db2046a231893e5712f/run_0000/point_cloud/iteration_30000/point_cloud_rk0_ws1.ply"
-            // ]
+            "args": [
+                "--input-json", "output_yifei_dl3dv/0a6c01ac3212768772f8f6eca86314c72d5ca320c3e3def148ddaceab23c07f4.json",
+                "--mask-root", "mask_dl3dv"
+
+                // "--mask_json",
+                // "618f6e739ea5fdc212fbdfe18568d9de8811636d2d6a6db2046a231893e5712f/floor/frame_00001_floor_agent_gemini-3-pro-preview-thinking_pred.json",
+                // "--cam_dir",
+                // "618f6e739ea5fdc212fbdfe18568d9de8811636d2d6a6db2046a231893e5712f/dense/cam",
+                // "--ply",
+                // "618f6e739ea5fdc212fbdfe18568d9de8811636d2d6a6db2046a231893e5712f/run_0000/point_cloud/iteration_30000/point_cloud_rk0_ws1.ply"
+            ]
         },
         {
             "name": "Debug: train 0a5c013435",
@@ -103,7 +106,7 @@
                 "--scene", "0a6c01ac3212768772f8f6eca86314c72d5ca320c3e3def148ddaceab23c07f4",
                 "--mask-root", "sam_dl3dv/",
                 "--model-path", "output_DL3DV/1K/0a6c01ac3212768772f8f6eca86314c72d5ca320c3e3def148ddaceab23c07f4",
-                "--erode-pixels", "10",
+                "--erode-pixels", "20",
                 "--output-dir", "output_yifei_dl3dv"
 
             ]

@@ -44,3 +44,8 @@ for scene in "${SCENES[@]}"; do
     echo "✓ Completed scene: ${scene}"
     echo ""
 done
+
+
+
+
+python 3d_bounding_instance_gs_rerun.py --data-root DL3DV/1K/ --scene 0a6c01ac3212768772f8f6eca86314c72d5ca320c3e3def148ddaceab23c07f4 --mask-root sam_dl3dv --model-path output_DL3DV/1K/0a6c01ac3212768772f8f6eca86314c72d5ca320c3e3def148ddaceab23c07f4/ --output-dir output_yifei_dl3dv/ --erode-pixels 15
