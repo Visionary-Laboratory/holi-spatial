@@ -11,6 +11,7 @@ import os
 import numpy as np
 import numpy.typing as npt
 import torch
+import cv2
 from PIL import Image
 from skimage import morphology
 from tqdm import tqdm
@@ -131,6 +132,29 @@ def resize_mask_to_depth(mask: np.ndarray, depth: np.ndarray) -> np.ndarray:
     return (np.array(mask_resized) > 0).astype(bool)
 
 
+def remove_flying_pixels(depth_m: np.ndarray, k: int = 5, thr_m: float = 0.01) -> np.ndarray:
+    """
+    利用中值滤波删除深度飞点，返回与输入同尺寸的米单位深度。
+    飞点会被置为 0。
+    """
+    if k <= 1:
+        return depth_m.astype(np.float32)
+    # 处理 NaN / inf
+    depth_safe = np.nan_to_num(depth_m, nan=0.0, posinf=0.0, neginf=0.0)
+    depth_mm = np.clip(depth_safe * 1000.0, 0, 65535).astype(np.uint16)
+    med_mm = cv2.medianBlur(depth_mm, k)
+
+    depth = depth_mm.astype(np.float32) / 1000.0
+    med = med_mm.astype(np.float32) / 1000.0
+
+    valid = depth > 0
+    outlier = valid & (np.abs(depth - med) > thr_m)
+
+    out = depth.copy()
+    out[outlier] = 0.0  # 或 np.nan，根据下游需求
+    return out
+
+
 def mask_depth_to_points(
     mask: np.ndarray,
     depth: np.ndarray,
@@ -141,11 +165,15 @@ def mask_depth_to_points(
     if mask.shape != depth.shape:
         mask = resize_mask_to_depth(mask, depth)
 
+    depth_filtered = depth.copy()
+    depth_filtered[~mask] = 0
+    depth_filtered = remove_flying_pixels(depth_filtered)
+
     ys, xs = np.where(mask)
     if ys.size == 0:
         return np.empty((0, 3), dtype=np.float32)
 
-    d = depth[ys, xs].astype(np.float32)
+    d = depth_filtered[ys, xs].astype(np.float32)
     valid = np.isfinite(d) & (d > 0)
     if not np.any(valid):
         return np.empty((0, 3), dtype=np.float32)

@@ -102,12 +102,12 @@
             "cwd": "${workspaceFolder}",
             "env": {"CUDA_VISIBLE_DEVICES": "1"},
             "args": [
-                "--data-root", "DL3DV/1K/",
-                "--scene", "0a6c01ac3212768772f8f6eca86314c72d5ca320c3e3def148ddaceab23c07f4",
-                "--mask-root", "sam_dl3dv/",
-                "--model-path", "output_DL3DV/1K/0a6c01ac3212768772f8f6eca86314c72d5ca320c3e3def148ddaceab23c07f4",
-                "--erode-pixels", "20",
-                "--output-dir", "output_yifei_dl3dv"
+                // "--data-root", "DL3DV/1K/",
+                // "--scene", "0a6c01ac3212768772f8f6eca86314c72d5ca320c3e3def148ddaceab23c07f4",
+                // "--mask-root", "sam_dl3dv/",
+                // "--model-path", "output_DL3DV/1K/0a6c01ac3212768772f8f6eca86314c72d5ca320c3e3def148ddaceab23c07f4",
+                // "--erode-pixels", "20",
+                // "--output-dir", "output_yifei_dl3dv"
 
             ]
         }
