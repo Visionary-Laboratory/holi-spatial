@@ -1,16 +1,47 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SCENES=(
-    "00dd871005"
-    "033d0b9343"
-    "020312de8d"
-    "00a231a370"
-    "02c2ddee2a"
-)
+# SCENES=(
+# "0271889ec0"
+# )
 
 DATA_ROOT="/home/liuyifei/code/posevlm/scannetppv2/data"
 OUTPUT_ROOT="/home/liuyifei/code/posevlm/output"
+PROCESSED_ROOT="/home/liuyifei/code/posevlm/output_yifei"
+
+# 自动收集需要处理的场景：必须存在 point_cloud/iteration_30000/point_cloud.ply，
+# 并且 output_yifei 下还没有同名 json（视为已处理）。
+readarray -t SCENES < <(
+    OUTPUT_ROOT="${OUTPUT_ROOT}" PROCESSED_ROOT="${PROCESSED_ROOT}" python - <<'PY'
+from pathlib import Path
+import os
+
+output_root = Path(os.environ["OUTPUT_ROOT"])
+processed_root = Path(os.environ["PROCESSED_ROOT"])
+
+scenes = []
+for entry in sorted(output_root.iterdir()):
+    if not entry.is_dir():
+        continue
+    ply_path = entry / "point_cloud" / "iteration_30000" / "point_cloud.ply"
+    if not ply_path.exists():
+        continue
+    if (processed_root / f"{entry.name}.json").exists():
+        continue
+    scenes.append(entry.name)
+
+print("\n".join(scenes))
+PY
+)
+
+echo "待处理场景数量: ${#SCENES[@]}"
+
+if [ ${#SCENES[@]} -eq 0 ]; then
+    echo "没有符合条件的场景需要处理，直接退出。"
+    exit 0
+fi
+
+
 
 for scene in "${SCENES[@]}"; do
     echo "=== Processing scene: ${scene} ==="

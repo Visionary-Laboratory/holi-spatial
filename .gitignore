@@ -24,3 +24,15 @@ class_dl3dv_agent_vis
 mask_dl3dv
 sam_dl3dv
 scene_objects_dl3dv/0a6c01ac3212768772f8f6eca86314c72d5ca320c3e3def148ddaceab23c07f4.json
+scannetpptv2_wai
+
+train_pgsr_progress_dl3dv.json
+.gitignore
+train_pgsr_progress.json
+eval_vlm
+scene_objects_Qwen3-VL-30B-A3B-Thinking/0e900bcc5c.json
+# train_pgsr_progress.json
+qa_generation
+
+preds_1704.jsonl
+train_pgsr_progress.json

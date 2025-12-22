@@ -9,12 +9,11 @@ set -euo pipefail
 # 训练完成的场景会记录到 train_pgsr_progress.json，重复运行会跳过已完成场景。
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SCENE_ROOT="${SCENE_ROOT:-$ROOT_DIR/scannetppv2/data}"
-PCL_ROOT="${PCL_ROOT:-$ROOT_DIR/DptV3/data}"
-OUTPUT_ROOT="${OUTPUT_ROOT:-$ROOT_DIR/output}"
-LOG_FILE="${LOG_FILE:-$ROOT_DIR/train_pgsr_progress.json}"
+SCENE_ROOT="${SCENE_ROOT:-$ROOT_DIR/DL3DV/1K}"
+OUTPUT_ROOT="${OUTPUT_ROOT:-$ROOT_DIR/output_DL3DV/1K/}"
+LOG_FILE="${LOG_FILE:-$ROOT_DIR/train_pgsr_progress_dl3dv.json}"
 SLEEP_INTERVAL=5   # 轮询作业完成的间隔（秒）
-MAX_JOBS_PER_GPU=1
+MAX_JOBS_PER_GPU=3
 DONE_PLY_REL="point_cloud/iteration_30000/point_cloud.ply"
 
 # 线程安全地更新日志，维护四类状态：pending/running/completed/failed
@@ -103,8 +102,8 @@ for name in sorted(os.listdir(scene_root)):
     if os.path.isfile(os.path.join(output_root, name, done_rel)):
         skip_done += 1
         continue
-    if os.path.isdir(os.path.join(d, "dslr", "nerfstudio")) and os.path.isdir(
-        os.path.join(d, "dslr", "resized_undistorted_images")
+    if os.path.isdir(os.path.join(d, "dense", "cam")) and os.path.isdir(
+        os.path.join(d, "dense", "rgb")
     ):
         keep.append(name)
     else:
@@ -123,9 +122,8 @@ run_scene() {
   (
     export CUDA_VISIBLE_DEVICES="$gpu"
     python PGSR/train.py \
-      -s "$SCENE_ROOT/$scene/dslr/nerfstudio" \
-      -i "$SCENE_ROOT/$scene/dslr/resized_undistorted_images" \
-      --ply_path "$PCL_ROOT/$scene/pointcloud_da3.ply" \
+      -s "$SCENE_ROOT/$scene" \
+      -i "rgb" \
       -m "$OUTPUT_ROOT/$scene" \
       --resolution 1
     local code=$?
@@ -135,7 +133,6 @@ run_scene() {
 
 main() {
   echo "SCENE_ROOT=$SCENE_ROOT"
-  echo "PCL_ROOT=$PCL_ROOT"
   echo "OUTPUT_ROOT=$OUTPUT_ROOT"
   echo "LOG_FILE=$LOG_FILE"
   # 获取 GPU 数量

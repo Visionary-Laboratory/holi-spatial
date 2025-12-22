@@ -31,7 +31,7 @@ from scene.gaussian_model import GaussianModel  # noqa: E402
 DEFAULT_SCENE = "0a5c013435"
 DEFAULT_DATA_ROOT = Path("/home/liuyifei/code/posevlm/scannetppv2/data")
 DEFAULT_MASK_ROOT = Path("/home/liuyifei/code/posevlm/sam_masks_debug")
-DEFAULT_OUTPUT_DIR = Path("/home/liuyifei/code/posevlm/output_yifei")
+DEFAULT_OUTPUT_DIR = Path("/home/liuyifei/code/posevlm/output_w_description")
 DEFAULT_GS_MODEL = Path("/home/liuyifei/code/posevlm/output") / DEFAULT_SCENE
 DEFAULT_RERUN = True
 MAX_POINT_COUNT = 5_000_000
@@ -700,7 +700,14 @@ def process_scene(
                 return Path(img_a).parent.name == Path(img_b).parent.name
 
             merge_indices = []
-            for idx, inst in enumerate(instances):
+            indices_to_check = range(len(instances))
+            if len(instances) > 1000:
+                # 实例过多时均匀抽取 500 个进行重叠检查以加速
+                sampled = np.linspace(0, len(instances) - 1, num=500, dtype=int)
+                indices_to_check = sorted(set(int(x) for x in sampled))
+
+            for idx in indices_to_check:
+                inst = instances[idx]
                 overlap = obb_overlap(
                     inst["obb_transform"],
                     inst["obb_extents"],
@@ -749,6 +756,7 @@ def process_scene(
                     "obb_transform": transform.tolist(),  # 4x4 矩阵
                     "obb_extents": extents.tolist(),  # (3,) 尺寸
                     "images": sorted(inst["images"]),
+                    "higest_cofidence_mask": 
                 }
             )
             pts_vis = pts

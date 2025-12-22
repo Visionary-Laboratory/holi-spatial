@@ -23,9 +23,10 @@
             "console": "integratedTerminal",
             "env": {"CUDA_VISIBLE_DEVICES": "1"},
             "args": [
-                "--data-root","DL3DV",
-                "--scene", "1K/0a6c01ac3212768772f8f6eca86314c72d5ca320c3e3def148ddaceab23c07f4",
-                "--output-dir", "/home/liuyifei/code/posevlm/class_dl3dv"
+                // "--data-root","DL3DV",
+                "--scene-json", "scene_objects_Qwen3-VL-30B-A3B-Instruct/01ce24e652.json",
+                // "--output-dir", "/home/liuyifei/code/posevlm/output",
+                // "--scene",  "0e900bcc5c"
             ]
 
         },
@@ -33,14 +34,11 @@
             "name": "Python 调试程序: agent.py",
             "type": "debugpy",
             "request": "launch",
-            "program": "agent.py",
+            "program": "sam3.py",
             "console": "integratedTerminal",
             "args": [
             // "--prompt","pipe"
-                "--scene-json","class_dl3dv/0a6c01ac3212768772f8f6eca86314c72d5ca320c3e3def148ddaceab23c07f4.json",
-                "--data-root", "DL3DV/1K",
-                "--sam-output-dir", "class_dl3dv_agent_vis" ,
-                "--mask-output-dir", "class_dl3dv_agent"
+            "--scene-json", "scene_objects_Qwen3-VL-30B-A3B-Instruct/01ce24e652.json",
         ]
         },
         {
