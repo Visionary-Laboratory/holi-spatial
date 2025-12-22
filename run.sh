@@ -7,7 +7,7 @@ set -euo pipefail
 
 DATA_ROOT="/home/liuyifei/code/posevlm/scannetppv2/data"
 OUTPUT_ROOT="/home/liuyifei/code/posevlm/output"
-PROCESSED_ROOT="/home/liuyifei/code/posevlm/output_yifei"
+PROCESSED_ROOT="/home/liuyifei/code/posevlm/output_3d_bounding"
 
 # 自动收集需要处理的场景：必须存在 point_cloud/iteration_30000/point_cloud.ply，
 # 并且 output_yifei 下还没有同名 json（视为已处理）。
