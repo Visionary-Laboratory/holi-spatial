@@ -44,3 +44,7 @@ train_vlm
 3d_2d.py
 train_pgsr_progress.json
 # .vscode/launch.json
+scannetppv2_wai
+scannetppv2_wai
+PGSR/*/__pycache__/*
+sam3/__pycache__/*
