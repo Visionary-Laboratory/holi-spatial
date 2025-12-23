@@ -1,6 +1,6 @@
 scene_objects_Qwen2.5-VL-7B-Instruct
 scannetppv2
-PGSR
+# PGSR
 # samsam_masks_*
 assets
 agent_output
@@ -36,3 +36,11 @@ qa_generation
 
 preds_1704.jsonl
 train_pgsr_progress.json
+2d_bounding_reproject
+flash*
+train_vlm
+2d_reproject.py
+3d_2d
+3d_2d.py
+train_pgsr_progress.json
+# .vscode/launch.json

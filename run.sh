@@ -41,37 +41,81 @@ if [ ${#SCENES[@]} -eq 0 ]; then
     exit 0
 fi
 
+# 并行配置
+GPU_IDS=(0 1) # 指定可用的 GPU 编号
+GPU_COUNT=${#GPU_IDS[@]}
+MAX_PARALLEL=4    # 总并行进程数
 
+# 初始化 GPU 令牌桶，用于管理每个 GPU 的任务分配
+TOKEN_DIR=$(mktemp -d)
+trap 'rm -rf "$TOKEN_DIR"' EXIT
 
-for scene in "${SCENES[@]}"; do
-    echo "=== Processing scene: ${scene} ==="
+# 创建总计 MAX_PARALLEL 个令牌，并循环分配 GPU ID
+for ((i=0; i<MAX_PARALLEL; i++)); do
+    gpu_id=${GPU_IDS[$((i % GPU_COUNT))]}
+    touch "${TOKEN_DIR}/slot_${i}_gpu_${gpu_id}"
+done
+
+process_scene() {
+    local scene="$1"
     
-    # 临时关闭 -e，允许错误继续执行
-    set +e
+    # 原子获取一个可用的 GPU 令牌
+    local token=""
+    local gpu_id=""
+    while true; do
+        for f in "${TOKEN_DIR}"/slot_*; do
+            [ -e "$f" ] || continue
+            token=$(basename "$f")
+            # 尝试抢占令牌（将文件重命名为 .busy）
+            if mv "$f" "${TOKEN_DIR}/${token}.busy" 2>/dev/null; then
+                # 提取 GPU ID
+                gpu_id=$(echo "$token" | sed 's/.*_gpu_//')
+                break 2
+            fi
+        done
+        sleep 1
+    done
 
+    echo "=== Processing scene: ${scene} on GPU ${gpu_id} ==="
+    
+    # 设置当前进程使用的 GPU
+    export CUDA_VISIBLE_DEVICES="${gpu_id}"
+    
     # 在 mindcube 环境下跑 classic.py
     conda run -n mindcube python classic.py \
         --data-root "${DATA_ROOT}" --scene "${scene}"
     if [ $? -ne 0 ]; then
-        echo "❌ Error: classic.py failed for scene ${scene}, continuing..."
+        echo "❌ Error: classic.py failed for scene ${scene} on GPU ${gpu_id}"
     fi
 
     # 在 Octree 环境下跑 sam3 + 3d_bounding_instance_gs_rerun.py
     conda run -n mindcube python sam3.py \
         --scene-json "scene_objects_Qwen3-VL-30B-A3B-Instruct/${scene}.json"
     if [ $? -ne 0 ]; then
-        echo "❌ Error: sam3.py failed for scene ${scene}, continuing..."
+        echo "❌ Error: sam3.py failed for scene ${scene} on GPU ${gpu_id}"
     fi
 
     conda run -n Octree python 3d_bounding_instance_gs_rerun.py \
         --scene "${scene}" -m "${OUTPUT_ROOT}/${scene}"
     if [ $? -ne 0 ]; then
-        echo "❌ Error: 3d_bounding_instance_gs_rerun.py failed for scene ${scene}, continuing..."
+        echo "❌ Error: 3d_bounding_instance_gs_rerun.py failed for scene ${scene} on GPU ${gpu_id}"
     fi
     
-    # 恢复 -e 设置
-    set -e
+    echo "✓ Completed scene: ${scene} on GPU ${gpu_id}"
+
+    # 释放令牌，归还到池中
+    mv "${TOKEN_DIR}/${token}.busy" "${TOKEN_DIR}/${token}"
+}
+
+for scene in "${SCENES[@]}"; do
+    process_scene "${scene}" &
     
-    echo "✓ Completed scene: ${scene}"
-    echo ""
+    # 限制总并行任务数量（等待令牌机制实际上已经限制了，但这里保留以保持逻辑清晰）
+    while [ $(jobs -rp | wc -l) -ge ${MAX_PARALLEL} ]; do
+        sleep 1
+    done
 done
+
+# 等待所有剩余任务完成
+wait
+echo "所有任务已完成。"

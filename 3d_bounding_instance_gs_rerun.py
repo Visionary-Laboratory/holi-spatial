@@ -568,37 +568,37 @@ def log_rerun_scene(
             )
 
     # 相机与渲染彩色图（可选下采样）
-    for stem, c2w in c2w_map.items():
-        if stem not in intr_map or stem not in color_map:
-            continue
-        K = intr_map[stem]
-        fx, fy, cx, cy = K[0, 0], K[1, 1], K[0, 2], K[1, 2]
-        img = color_map[stem]
-        img_uint8 = (img * 255.0).clip(0, 255).astype(np.uint8)
-        max_side = max(img_uint8.shape[0], img_uint8.shape[1])
-        if cam_max_size > 0 and max_side > cam_max_size:
-            scale = cam_max_size / float(max_side)
-            new_size = (max(1, int(round(img_uint8.shape[1] * scale))), max(1, int(round(img_uint8.shape[0] * scale))))
-            pil_img = Image.fromarray(img_uint8)
-            pil_img = pil_img.resize(new_size, resample=Image.BILINEAR)
-            img_uint8 = np.array(pil_img, dtype=np.uint8)
-        H, W = img_uint8.shape[0], img_uint8.shape[1]
-        rr.log(
-            f"cameras/{stem}",
-            rr.Transform3D(
-                translation=c2w[:3, 3].astype(np.float32),
-                mat3x3=c2w[:3, :3].astype(np.float32),
-            ),
-        )
-        rr.log(
-            f"cameras/{stem}/pinhole",
-            rr.Pinhole(
-                focal_length=np.array([fx, fy], dtype=np.float32),
-                principal_point=np.array([cx, cy], dtype=np.float32),
-                resolution=np.array([W, H], dtype=np.float32),
-            ),
-        )
-        rr.log(f"cameras/{stem}/image", rr.Image(img_uint8))
+    # for stem, c2w in c2w_map.items():
+    #     if stem not in intr_map or stem not in color_map:
+    #         continue
+    #     K = intr_map[stem]
+    #     fx, fy, cx, cy = K[0, 0], K[1, 1], K[0, 2], K[1, 2]
+    #     img = color_map[stem]
+    #     img_uint8 = (img * 255.0).clip(0, 255).astype(np.uint8)
+    #     max_side = max(img_uint8.shape[0], img_uint8.shape[1])
+    #     if cam_max_size > 0 and max_side > cam_max_size:
+    #         scale = cam_max_size / float(max_side)
+    #         new_size = (max(1, int(round(img_uint8.shape[1] * scale))), max(1, int(round(img_uint8.shape[0] * scale))))
+    #         pil_img = Image.fromarray(img_uint8)
+    #         pil_img = pil_img.resize(new_size, resample=Image.BILINEAR)
+    #         img_uint8 = np.array(pil_img, dtype=np.uint8)
+    #     H, W = img_uint8.shape[0], img_uint8.shape[1]
+    #     rr.log(
+    #         f"cameras/{stem}",
+    #         rr.Transform3D(
+    #             translation=c2w[:3, 3].astype(np.float32),
+    #             mat3x3=c2w[:3, :3].astype(np.float32),
+    #         ),
+    #     )
+    #     rr.log(
+    #         f"cameras/{stem}/pinhole",
+    #         rr.Pinhole(
+    #             focal_length=np.array([fx, fy], dtype=np.float32),
+    #             principal_point=np.array([cx, cy], dtype=np.float32),
+    #             resolution=np.array([W, H], dtype=np.float32),
+    #         ),
+    #     )
+    #     rr.log(f"cameras/{stem}/image", rr.Image(img_uint8))
 
 
 def process_scene(
@@ -661,7 +661,14 @@ def process_scene(
     for label, label_items in label_groups.items():
         logging.info("处理标签 %s，共 %d 个 mask", label, len(label_items))
         instances: List[Dict] = []
+        if len(label_items) > 1000:
+            # 实例过多时均匀抽取 500 个进行重叠检查以加速
+            sampled = np.linspace(0, len(label_items) - 1, num=500, dtype=int)
+            label_items = [label_items[i] for i in sorted(set(int(x) for x in sampled))]
         for item in tqdm(label_items, desc=f"Processing {label}"):
+
+
+
             image_name = item["image"]
             mask_path = Path(item["mask_path"])
             # if mask_score_map.get(item["mask_path"]) <= 0.75 :
@@ -714,12 +721,24 @@ def process_scene(
                     transform,
                     extents,
                 )
-                same_frame = any(
+                # 检查新 mask 是否与该实例冲突
+                conflict_with_new = any(
                     share_same_frame(img, next(iter(new_inst["images"])))
                     for img in inst["images"]
                 )
-                if overlap and not same_frame:
-                    merge_indices.append(idx)
+                
+                if overlap and not conflict_with_new:
+                    # 还需要检查：如果要合并这个实例，会不会导致 merge_indices 里的实例互相冲突？
+                    can_merge_with_others = True
+                    for already_selected_idx in merge_indices:
+                        if any(share_same_frame(img1, img2) 
+                               for img1 in instances[already_selected_idx]["images"] 
+                               for img2 in inst["images"]):
+                            can_merge_with_others = False
+                            break
+                    
+                    if can_merge_with_others:
+                        merge_indices.append(idx)
 
             if not merge_indices:
                 instances.append(new_inst)
@@ -739,26 +758,61 @@ def process_scene(
                 merged["obb_transform"], merged["obb_extents"] = compute_obb(all_pts)
                 instances.append(merged)
 
-        logging.info("标签 %s 合并得到 %d 个实例", label, len(instances))
+        logging.info("标签 %s 初步合并得到 %d 个实例", label, len(instances))
+
+        # 1. 置信度过滤
+        qualified_instances = []
         for inst in instances:
-            # 至少有一张 mask 的得分 >= 0.85 才保留该实例
-            if not any((mask_score_map.get(img) or 0.0) >= 0.9 for img in inst["images"]):
-                continue
+            if any((mask_score_map.get(img) or 0.0) >= 0.9 for img in inst["images"]):
+                qualified_instances.append(inst)
+
+        # 2. 对同一类别的实例进行二次 overlap 检测 (阈值 0.8)
+        final_instances = []
+        for q_inst in qualified_instances:
+            q_transform = q_inst["obb_transform"]
+            q_extents = q_inst["obb_extents"]
+            
+            merged = False
+            for f_idx, f_inst in enumerate(final_instances):
+                # 如果重叠度 > 0.8，则融合
+                if obb_overlap(q_transform, q_extents, f_inst["obb_transform"], f_inst["obb_extents"], intersect_ratio=0.8):
+                    f_inst["points"].extend(q_inst["points"])
+                    f_inst["images"] |= q_inst["images"]
+                    
+                    # 重新计算融合后的 OBB
+                    all_pts = np.concatenate(f_inst["points"], axis=0)
+                    if instance_max_points > 0 and all_pts.shape[0] > instance_max_points:
+                        idx = np.random.choice(all_pts.shape[0], instance_max_points, replace=False)
+                        all_pts = all_pts[idx]
+                    f_inst["obb_transform"], f_inst["obb_extents"] = compute_obb(all_pts)
+                    merged = True
+                    break
+            
+            if not merged:
+                final_instances.append(q_inst)
+
+        logging.info("标签 %s 最终过滤与二次合并后剩余 %d 个实例", label, len(final_instances))
+
+        # 3. 记录最终结果
+        for inst in final_instances:
             pts = np.concatenate(inst["points"], axis=0)
             transform = inst["obb_transform"]
             extents = inst["obb_extents"]
             bbox = bbox_corners_from_obb(transform, extents)
+            
             results.append(
                 {
                     "ins_id": str(inst_counter),
                     "label": label,
-                    "bounding_box": bbox,  # 8 个角点
-                    "obb_transform": transform.tolist(),  # 4x4 矩阵
-                    "obb_extents": extents.tolist(),  # (3,) 尺寸
+                    "bounding_box": bbox,
+                    "obb_transform": transform.tolist(),
+                    "obb_extents": extents.tolist(),
                     "images": sorted(inst["images"]),
                     "highest_confidence_mask": max(inst["images"], key=lambda img: mask_score_map.get(img, 0.0)),
                 }
             )
+            
+            # 用于 rerun 可视化的点云
             pts_vis = pts
             if instance_max_points > 0 and pts.shape[0] > instance_max_points:
                 idx = np.random.choice(pts.shape[0], instance_max_points, replace=False)

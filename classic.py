@@ -91,7 +91,7 @@ def build_messages(image: Image.Image, previous_labels: Sequence[str]) -> List[D
                     "type": "text",
                     "text": (
                         "Identify clear, specific object classes in this image using concise, "
-                        "lowercase English nouns (e.g., chair, table, sofa). "
+                        "lowercase English nouns (e.g., floor, chair, table, sofa). "
                         "Do not use vague or generic descriptions; if an object cannot be "
                         "described precisely, skip it. "
                         f"Existing labels from previous frames: {previous_text}. "
