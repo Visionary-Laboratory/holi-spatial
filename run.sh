@@ -19,9 +19,9 @@ PROCESSED_ROOT="/home/liuyifei/code/posevlm/output_3d_bounding"
 #run PGSR
 
 ## Scannetpp
-bash train_pgsr.sh
-## DL3DV
-bash pgsr_train_dl3dv.sh
+# bash train_pgsr.sh
+# ## DL3DV
+# bash pgsr_train_dl3dv.sh
 
 # 自动收集需要处理的场景：必须存在 point_cloud/iteration_30000/point_cloud.ply，
 # 并且 output_yifei 下还没有同名 json（视为已处理）。
