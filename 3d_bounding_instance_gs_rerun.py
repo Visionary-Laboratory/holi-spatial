@@ -17,6 +17,7 @@ from skimage import morphology
 from tqdm import tqdm
 import trimesh
 from scipy.spatial.transform import Rotation as R
+import pycocotools.mask as mask_utils
 
 PGSR_ROOT = Path(__file__).parent / "PGSR"
 if str(PGSR_ROOT) not in sys.path:
@@ -122,6 +123,13 @@ def load_transforms(scene_dir: Path) -> Tuple[Dict[str, np.ndarray], Dict[str, n
 def load_mask(mask_path: Path) -> np.ndarray:
     mask = Image.open(mask_path).convert("L")
     return np.array(mask) > 0
+
+
+def encode_mask(mask: np.ndarray) -> dict:
+    """将 mask 编码为 RLE 格式，与 agent.py 中的保存方式一致"""
+    rle = mask_utils.encode(np.asarray(mask, order="F"))
+    rle["counts"] = rle["counts"].decode("utf-8")
+    return rle
 
 
 def resize_mask_to_depth(mask: np.ndarray, depth: np.ndarray) -> np.ndarray:
@@ -695,11 +703,14 @@ def process_scene(
 
             # 计算 OBB
             transform, extents = compute_obb(points)
+            # 编码 mask 并保存
+            mask_encoding = encode_mask(mask)
             new_inst = {
                 "points": [points],
                 "obb_transform": transform,
                 "obb_extents": extents,
                 "images": {str(mask_path)},
+                "mask_encodings": {str(mask_path): mask_encoding},
             }
 
             # 判断是否与已有实例合并
@@ -748,6 +759,11 @@ def process_scene(
                     inst = instances.pop(idx)
                     merged["points"].extend(inst["points"])
                     merged["images"] |= inst["images"]
+                    # 合并 mask 编码
+                    if "mask_encodings" not in merged:
+                        merged["mask_encodings"] = {}
+                    if "mask_encodings" in inst:
+                        merged["mask_encodings"].update(inst["mask_encodings"])
                 # 重新计算合并后的 OBB
                 all_pts = np.concatenate(merged["points"], axis=0)
                 if instance_max_points > 0 and all_pts.shape[0] > instance_max_points:
@@ -778,6 +794,11 @@ def process_scene(
                 if obb_overlap(q_transform, q_extents, f_inst["obb_transform"], f_inst["obb_extents"], intersect_ratio=0.8):
                     f_inst["points"].extend(q_inst["points"])
                     f_inst["images"] |= q_inst["images"]
+                    # 合并 mask 编码
+                    if "mask_encodings" not in f_inst:
+                        f_inst["mask_encodings"] = {}
+                    if "mask_encodings" in q_inst:
+                        f_inst["mask_encodings"].update(q_inst["mask_encodings"])
                     
                     # 重新计算融合后的 OBB
                     all_pts = np.concatenate(f_inst["points"], axis=0)
@@ -800,6 +821,13 @@ def process_scene(
             extents = inst["obb_extents"]
             bbox = bbox_corners_from_obb(transform, extents)
             
+            # 准备 mask 编码，按 images 顺序排序
+            mask_encodings_dict = inst.get("mask_encodings", {})
+            mask_encodings_list = []
+            for img_path in sorted(inst["images"]):
+                if img_path in mask_encodings_dict:
+                    mask_encodings_list.append(mask_encodings_dict[img_path])
+            
             results.append(
                 {
                     "ins_id": str(inst_counter),
@@ -809,6 +837,7 @@ def process_scene(
                     "obb_extents": extents.tolist(),
                     "images": sorted(inst["images"]),
                     "highest_confidence_mask": max(inst["images"], key=lambda img: mask_score_map.get(img, 0.0)),
+                    "mask_encodings": mask_encodings_list,
                 }
             )
             

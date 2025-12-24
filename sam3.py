@@ -193,7 +193,7 @@ def process_scene(
 
     logging.info("加载模型...")
     model = build_sam3_image_model(checkpoint_path="/mnt/shared-storage-user/solution/huggingface/hub/models--facebook--sam3/snapshots/2afe64078f4420bdfbc063162d1336003efadc81/sam3.pt")
-    processor = Sam3Processor(model, confidence_threshold=0.5)
+    processor = Sam3Processor(model, confidence_threshold=0.6)
 
     all_results: List[Dict] = []
     missing_images: List[str] = []
