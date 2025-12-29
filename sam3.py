@@ -9,6 +9,7 @@ from typing import Dict, Iterable, List, Optional, Sequence
 
 import numpy as np
 import torch
+import pycocotools.mask as mask_utils
 from PIL import Image
 
 from sam3.model_builder import build_sam3_image_model
@@ -138,6 +139,7 @@ def process_image(
     image_path: Path,
     labels: Iterable[str],
     mask_root: Path,
+    save_mask_images: bool = False,
 ) -> List[Dict]:
     image = Image.open(image_path).convert("RGB")
     results: List[Dict] = []
@@ -156,18 +158,26 @@ def process_image(
         for idx, item in enumerate(masks_info, 1):
             fname = f"{safe_label}_{idx:02d}.png" if multi else f"{safe_label}.png"
             mask_path = mask_root / image_path.stem / fname
-            save_mask(item["mask"], mask_path)
+            
+            mask_bool = item["mask"]
+            if save_mask_images:
+                save_mask(mask_bool, mask_path)
+
+            # 编码为 RLE
+            rle = mask_utils.encode(np.asfortranarray(mask_bool.astype(np.uint8)))
+            rle["counts"] = rle["counts"].decode("ascii")
 
             results.append(
                 {
                     "image": image_path.name,
                     "label": label,
                     "mask_path": str(mask_path),
+                    "mask_rle": rle,
                     "bbox": item.get("box"),
                     "score": item.get("score"),
                 }
             )
-        logging.info("已保存 %d 个 mask (%s)", len(masks_info), label)
+        logging.info("已处理 %d 个 mask (%s)", len(masks_info), label)
     return results
 
 
@@ -175,6 +185,7 @@ def process_scene(
     scene_json: Path,
     data_root: Path,
     output_dir: Path,
+    save_mask_images: bool = False,
 ) -> Path:
     scene_name, per_image = load_scene_json(scene_json)
 
@@ -206,10 +217,11 @@ def process_scene(
             missing_images.append(image_name)
             continue
         logging.info("(%d/%d) 处理图片 %s，标签数 %d", idx, len(per_image), image_name, len(labels))
-        image_results = process_image(processor, image_path, labels, mask_root)
+        image_results = process_image(processor, image_path, labels, mask_root, save_mask_images=save_mask_images)
         all_results.extend(image_results)
 
     output_dir.mkdir(parents=True, exist_ok=True)
+    mask_root.mkdir(parents=True, exist_ok=True)
     index_path = mask_root / "mask_index.json"
     index = {
         "scene": scene_name,
@@ -244,13 +256,18 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_OUTPUT_DIR,
         help="mask 及索引输出目录",
     )
+    parser.add_argument(
+        "--save-mask-images",
+        action="store_true",
+        help="是否显式保存黑白 mask 图片 (PNG)",
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     setup_logger()
     args = parse_args()
-    process_scene(args.scene_json, args.data_root, args.output_dir)
+    process_scene(args.scene_json, args.data_root, args.output_dir, save_mask_images=args.save_mask_images)
 
 
 if __name__ == "__main__":

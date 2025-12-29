@@ -32,7 +32,7 @@ train_pgsr_progress.json
 eval_vlm
 scene_objects_Qwen3-VL-30B-A3B-Thinking/0e900bcc5c.json
 # train_pgsr_progress.json
-qa_generation
+#qa_generation
 
 preds_1704.jsonl
 train_pgsr_progress.json
@@ -49,3 +49,12 @@ scannetppv2_wai
 PGSR/*/__pycache__/*
 sam3/__pycache__/*
 test_results
+models
+system_prompts
+logging/*
+sam3/agent/__pycache__/*
+3d_bounding_scannet.json
+train_pgsr_progress_dl3dv.json.lock
+train_pgsr_progress_dl3dv.json
+train_pgsr_progress.json.lock
+train_pgsr_progress.json

@@ -9,8 +9,8 @@ set -euo pipefail
 # 训练完成的场景会记录到 train_pgsr_progress.json，重复运行会跳过已完成场景。
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SCENE_ROOT="${SCENE_ROOT:-$ROOT_DIR/DL3DV/1K}"
-OUTPUT_ROOT="${OUTPUT_ROOT:-$ROOT_DIR/output_DL3DV/1K/}"
+SCENE_ROOT="${SCENE_ROOT:-$ROOT_DIR/DL3DV/2K}"
+OUTPUT_ROOT="${OUTPUT_ROOT:-$ROOT_DIR/output_DL3DV/2K/}"
 LOG_FILE="${LOG_FILE:-$ROOT_DIR/train_pgsr_progress_dl3dv.json}"
 SLEEP_INTERVAL=5   # 轮询作业完成的间隔（秒）
 MAX_JOBS_PER_GPU=3

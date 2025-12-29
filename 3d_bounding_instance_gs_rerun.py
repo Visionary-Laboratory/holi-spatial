@@ -18,6 +18,12 @@ from tqdm import tqdm
 import trimesh
 from scipy.spatial.transform import Rotation as R
 import pycocotools.mask as mask_utils
+from transformers import AutoModelForVision2Seq, AutoProcessor
+import base64
+import io
+
+from sam3.agent.helpers.visualizer import Visualizer
+from sam3.agent.helpers.zoom_in import render_zoom_in
 
 PGSR_ROOT = Path(__file__).parent / "PGSR"
 if str(PGSR_ROOT) not in sys.path:
@@ -30,12 +36,13 @@ from scene.gaussian_model import GaussianModel  # noqa: E402
 
 
 DEFAULT_SCENE = "0a5c013435"
-DEFAULT_DATA_ROOT = Path("/home/liuyifei/code/posevlm/scannetppv2/data")
-DEFAULT_MASK_ROOT = Path("/home/liuyifei/code/posevlm/sam_masks_debug")
-DEFAULT_OUTPUT_DIR = Path("/home/liuyifei/code/posevlm/output_3d_bounding")
-DEFAULT_GS_MODEL = Path("/home/liuyifei/code/posevlm/output") / DEFAULT_SCENE
-DEFAULT_RERUN = True
+DEFAULT_DATA_ROOT = Path("scannetppv2/data")
+DEFAULT_MASK_ROOT = Path("sam_masks_debug")
+DEFAULT_OUTPUT_DIR = Path("output_3d_bounding")
+DEFAULT_GS_MODEL = Path("output") / DEFAULT_SCENE
+DEFAULT_RERUN = False
 MAX_POINT_COUNT = 5_000_000
+DEFAULT_VLM_MODEL_PATH = "/mnt/shared-storage-user/intern7shared/share_ckpt_hf/models--Qwen--Qwen3-VL-30B-A3B-Thinking/snapshots/7e9bbfa2c1b2059edd18160793fd421194da2c10/"
 
 
 def label_color(label: str) -> np.ndarray:
@@ -47,32 +54,154 @@ def label_color(label: str) -> np.ndarray:
     return np.array([r, g, b, 255], dtype=np.uint8)
 
 
-def setup_logger() -> None:
+def setup_logger(log_path: Optional[Path] = None) -> None:
+    handlers: List[logging.Handler] = [logging.StreamHandler(sys.stdout)]
+    if log_path:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        handlers.append(logging.FileHandler(log_path, encoding="utf-8"))
+        
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(message)s",
+        force=True,
+        handlers=handlers
     )
 
 
-def load_transforms(scene_dir: Path) -> Tuple[Dict[str, np.ndarray], Dict[str, np.ndarray]]:
+def load_vlm_model(model_path: str):
+    logging.info("加载 VLM 模型: %s", model_path)
+    model = AutoModelForVision2Seq.from_pretrained(
+        model_path,
+        torch_dtype=torch.bfloat16,
+        attn_implementation="flash_attention_2",
+        device_map="auto",
+    )
+    processor = AutoProcessor.from_pretrained(model_path)
+    return model, processor
+
+
+def verify_label_with_vlm(
+    model,
+    processor,
+    raw_image: Image.Image,
+    overlay_image: Image.Image,
+    zoomed_image: Image.Image,
+    category: str,
+) -> bool:
+    """使用本地 Qwen 模型验证标签是否正确。"""
+    prompt = (
+        "You are a visual label verifier for a single masked object.\n"
+        "You will be given three images: (1) the original image, (2) an overlay image where the target object is highlighted with a colored mask, and (3) a zoomed-in pair showing the original object and the highlighted object.\n"
+        f'The user-provided label/category to verify is: "{category}".\n\n'
+
+        "Task:\n"
+        "Decide whether the given label correctly describes the object indicated by the HIGHLIGHTED region.\n"
+        "If it is correct, ACCEPT. If it is incorrect (wrong category), REJECT and provide the correct label you believe fits best.\n\n"
+
+        "Guidelines (consistency-and-rewrite mindset):\n"
+        "1) Focus ONLY on the object covered by the HIGHLIGHTED region. Ignore other objects outside the mask.\n"
+        "2) Identify the core visible noun/object class of the masked object (the best label).\n"
+        "3) Treat extra modifiers in the label (color/material/size/position/relations) as constraints ONLY if they are clearly visible.\n"
+        "   If modifiers are wrong or unverifiable but the core object class is correct, still ACCEPT.\n"
+        "4) If the mask covers only a part of an object but the object class is still clear, judge by the most likely full object.\n"
+        "5) If the masked region is ambiguous, too small, or does not correspond to a recognizable object, REJECT and set predicted_label to \"unknown\".\n"
+        "6) Use common-sense synonyms/hypernyms: accept reasonable equivalents (e.g., \"sofa\" vs \"couch\").\n"
+        "   If the label is too specific and not verifiable (e.g., exact brand/model/species), prefer a more general correct label.\n\n"
+
+        "Output format (VERY IMPORTANT):\n"
+        "Return ONLY a JSON object on a single line with these keys:\n"
+        "  - decision: \"ACCEPT\" or \"REJECT\"\n"
+        "  - predicted_label: a short English noun phrase for the masked object class (e.g., \"chair\", \"person\", \"car\").\n"
+        "Rules:\n"
+        "  - If decision is ACCEPT, predicted_label should be exactly the provided label (category) or its closest normalized form.\n"
+        "  - If decision is REJECT, predicted_label must be your best guess of the correct label, or \"unknown\" if unclear.\n"
+        "Do not output any extra text after the JSON object. The JSON should be the final part of your response."
+    )
+
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "image", "image": raw_image.convert("RGB")},
+                {"type": "image", "image": overlay_image.convert("RGB")},
+                {"type": "image", "image": zoomed_image.convert("RGB")},
+                {"type": "text", "text": prompt},
+            ],
+        }
+    ]
+
+    try:
+        # 准备模型输入
+        inputs = processor.apply_chat_template(
+            messages,
+            tokenize=True,
+            add_generation_prompt=True,
+            return_dict=True,
+            return_tensors="pt",
+        )
+        inputs = inputs.to(model.device)
+
+        with torch.inference_mode():
+            # 再次增加 tokens 限制，某些复杂场景 Thinking 需要极长的篇幅
+            generated_ids = model.generate(**inputs, max_new_tokens=2048)
+
+        # 提取生成的文本
+        trimmed = [
+            out_ids[len(in_ids) :] for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
+        ]
+        output_text = processor.batch_decode(
+            trimmed, skip_special_tokens=True, clean_up_tokenization_spaces=False
+        )[0]
+
+        # 尝试从输出中提取 JSON
+        import json
+        import re
+        
+        # 寻找 JSON 块：匹配最外层的 {}
+        json_match = re.search(r'\{.*\}', output_text, re.DOTALL)
+        if json_match:
+            json_str = json_match.group(0)
+            try:
+                data = json.loads(json_str)
+                decision = data.get("decision", "REJECT")
+                logging.info("Qwen 验证结果 [%s]: %s -> %s", category, decision, data.get("predicted_label", ""))
+                return decision == "ACCEPT"
+            except json.JSONDecodeError:
+                logging.warning("Qwen 返回了无效的 JSON 字符串: %s", json_str)
+        else:
+            logging.warning("Qwen 未能输出 JSON 格式结果，输出预览: %s...", output_text[:200])
+    except Exception as e:
+        logging.warning("Qwen 验证过程出错: %s", e)
+
+    return False
+
+
+def load_transforms(scene_dir: Path) -> Tuple[Dict[str, np.ndarray], Dict[str, np.ndarray], str, Dict[str, Tuple[int, int]], Dict[str, str]]:
     """
     读取 nerfstudio transforms_undistorted.json，返回
       intr_map[stem] = 3x3 K
       c2w_map[stem] = 4x4 camera-to-world
+      scene_type: str
+      size_map[stem] = (width, height)
+      path_map[stem] = image_path
     """
     # scannetppv2
-    if (scene_dir/"dslr").exists():
+    if (scene_dir).exists():
         scene_type = "scannetppv2"
-        json_path = scene_dir / "dslr" / "nerfstudio" / "transforms_undistorted.json"
+        json_path = scene_dir /    "dslr/nerfstudio/transforms_undistorted.json"
         with json_path.open("r", encoding="utf-8") as f:
             contents = json.load(f)
 
         fl_x, fl_y, cx, cy = contents["fl_x"], contents["fl_y"], contents["cx"], contents["cy"]
+        w, h = contents.get("w"), contents.get("h")
         train_frames = contents.get("frames", [])
         test_frames = contents.get("test_frames", [])
 
         intr_map: Dict[str, np.ndarray] = {}
         c2w_map: Dict[str, np.ndarray] = {}
+        size_map: Dict[str, Tuple[int, int]] = {}
+        path_map: Dict[str, str] = {}
+        
         for frame in [*train_frames, *test_frames]:
             K = np.array([[fl_x, 0, cx], [0, fl_y, cy], [0, 0, 1]], dtype=np.float32)
             c2w = np.array(frame["transform_matrix"], dtype=np.float32)
@@ -81,15 +210,25 @@ def load_transforms(scene_dir: Path) -> Tuple[Dict[str, np.ndarray], Dict[str, n
             stem = Path(frame["file_path"]).stem
             intr_map[stem] = K
             c2w_map[stem] = c2w
+            
+            frame_w = frame.get("w", w)
+            frame_h = frame.get("h", h)
+            size_map[stem] = (frame_w, frame_h)
+            path_map[stem] = str(scene_dir / "dslr/" / "resized_undistorted_images" /frame["file_path"])
+            
         logging.info("加载位姿完成，数量: %d", len(intr_map))
-        return intr_map, c2w_map, scene_type
+        return intr_map, c2w_map, scene_type, size_map, path_map
     # dl3dv
     elif (scene_dir/"dense").exists():
         scene_type = "dl3dv"
         cam_dir = scene_dir / "dense" / "cam"
+        rgb_dir = scene_dir / "dense" / "rgb"
         cam_files = sorted([f for f in os.listdir(cam_dir) if f.endswith('.npz')])
         intr_map: Dict[str, np.ndarray] = {}
         c2w_map: Dict[str, np.ndarray] = {}
+        size_map: Dict[str, Tuple[int, int]] = {}
+        path_map: Dict[str, str] = {}
+        
         for idx, cam_file in tqdm(enumerate(cam_files),total=len(cam_files),):
             cam_file_path = os.path.join(cam_dir, cam_file)
             cam_data = np.load(cam_file_path)
@@ -113,8 +252,22 @@ def load_transforms(scene_dir: Path) -> Tuple[Dict[str, np.ndarray], Dict[str, n
             stem = Path(cam_file).stem
             intr_map[stem] = K
             c2w_map[stem] = c2w
+            
+            # DL3DV 通常在 npz 中包含尺寸，或者需要读取图片
+            img_path = rgb_dir / f"{stem}.png"
+            if not img_path.exists():
+                img_path = rgb_dir / f"{stem}.jpg"
+            
+            if 'width' in cam_data and 'height' in cam_data:
+                size_map[stem] = (int(cam_data['width']), int(cam_data['height']))
+            else:
+                # 如果没有尺寸，尝试读取第一张图获取尺寸
+                with Image.open(img_path) as img:
+                    size_map[stem] = img.size
+            path_map[stem] = str(img_path)
+            
         logging.info("加载位姿完成，数量: %d", len(intr_map))
-        return intr_map, c2w_map, scene_type
+        return intr_map, c2w_map, scene_type, size_map, path_map
     else:
         raise NotImplementedError(f"不支持的场景格式: {scene_dir}, 目前只支持scannetppv2和dl3dv.")
 
@@ -258,7 +411,7 @@ def obb_overlap(
     extents_a: np.ndarray,
     transform_b: np.ndarray,
     extents_b: np.ndarray,
-    intersect_ratio: float = 0.25,
+    intersect_ratio: float = 0.33,
 ) -> bool:
     """计算两个 OBB 的交叠体积，判断是否重叠。
     
@@ -408,29 +561,99 @@ def build_pipeline_defaults() -> argparse.Namespace:
     return argparse.Namespace(**vals)
 
 
-def render_depths_with_gaussians(model_path: Path, iteration: int) -> Tuple[Dict[str, np.ndarray], Dict[str, np.ndarray]]:
+def render_depths_with_gaussians(
+    model_path: Path, 
+    iteration: int, 
+    intr_map: Dict[str, np.ndarray], 
+    c2w_map: Dict[str, np.ndarray],
+    size_map: Dict[str, Tuple[int, int]],
+    path_map: Dict[str, str],
+    image_names: Optional[set[str]] = None
+) -> Tuple[Dict[str, np.ndarray], Dict[str, np.ndarray]]:
     """
-    使用 3DGS 渲染深度与颜色，返回
-      depth_map: {image_name: depth_numpy}
-      color_map: {image_name: color_numpy(H,W,3) in [0,1]}
+    使用 3DGS 渲染深度与颜色，不再初始化完整的 Scene，而是直接构造 Camera。
     """
+    from utils.graphics_utils import fov2focal, focal2fov
+    from scene.cameras import Camera
+
     cfg = load_gaussian_cfg(model_path)
     dataset = ModelParams(argparse.ArgumentParser(), sentinel=True).extract(cfg)
     pipeline = PipelineParams(argparse.ArgumentParser()).extract(build_pipeline_defaults())
 
     gaussians = GaussianModel(dataset.sh_degree)
-    scene = Scene(dataset, gaussians, load_iteration=iteration, shuffle=False)
+    gaussians.load_ply(str(model_path / "point_cloud" / f"iteration_30000" / "point_cloud.ply"))
+    
     background = torch.tensor([1, 1, 1] if dataset.white_background else [0, 0, 0], dtype=torch.float32, device="cuda")
 
     depth_map: Dict[str, np.ndarray] = {}
     color_map: Dict[str, np.ndarray] = {}
-    cameras = list(scene.getTrainCameras()) + list(scene.getTestCameras())
+    
+    # 确定需要渲染的 stems
+    if image_names is not None:
+        target_stems = {Path(name).stem for name in image_names}
+        stems_to_render = [s for s in target_stems if s in c2w_map]
+    else:
+        stems_to_render = list(c2w_map.keys())
+
+    logging.info("准备渲染相机数量: %d", len(stems_to_render))
+
     with torch.no_grad():
-        for cam in cameras:
+        for stem in tqdm(stems_to_render, desc="Rendering depths"):
+            # 获取位姿和内参
+            c2w = c2w_map[stem]
+            K = intr_map[stem]
+            width, height = size_map[stem]
+            image_path = path_map[stem]
+
+            # 3DGS 渲染需要 world2view (R, T)
+            # 根据 dataset_readers.py 的逻辑：
+            # 1. R 应该是 c2w 的旋转矩阵 (因为 Camera 内部会做 R.transpose() 得到 w2v 的旋转部分)
+            # 2. T 应该是 w2v 的平移向量 (即 -R_c2w.T @ T_c2w)
+            R_c2w = c2w[:3, :3]
+            T_c2w = c2w[:3, 3]
+            
+            R_w2v = R_c2w.T
+            T_w2v = -R_w2v @ T_c2w
+            
+            # 计算 FoV (与 dataset_readers.py 274-275行一致)
+            fx = K[0, 0]
+            fy = K[1, 1]
+            fovx = focal2fov(fx, width)
+            fovy = focal2fov(fy, height)
+
+            # 构造 Camera 对象，确保参数与 PGSR 内部创建的一致
+            cam = Camera(
+                colmap_id=0,
+                R=R_c2w,      # 传入 c2w 旋转部分
+                T=T_w2v,      # 传入 w2v 平移部分
+                FoVx=fovx,
+                FoVy=fovy,
+                image_width=width,
+                image_height=height,
+                image_path=image_path,
+                image_name=stem,
+                uid=0,
+                preload_img=False, # 渲染不需要预加载图片
+                data_device="cuda"
+            )
+
             out = render(cam, gaussians, pipeline, background)
-            depth_map[cam.image_name] = out["plane_depth"].squeeze().detach().cpu().numpy()
+            depth_np = out["plane_depth"].squeeze().detach().cpu().numpy()
+            depth_map[stem] = depth_np
             color = out["render"].permute(1, 2, 0).clamp(0, 1).detach().cpu().numpy()
-            color_map[cam.image_name] = color
+            color_map[stem] = color
+
+            # --- 临时可视化深度图 ---
+            # debug_depth_dir = Path("debug_depth_vis")
+            # debug_depth_dir.mkdir(exist_ok=True)
+            # valid_depth = depth_np[depth_np > 0]
+            # if valid_depth.size > 0:
+            #     d_min, d_max = valid_depth.min(), valid_depth.max()
+            #     depth_vis = (depth_np - d_min) / (d_max - d_min + 1e-8)
+            #     depth_vis = (np.clip(depth_vis, 0, 1) * 255).astype(np.uint8)
+            #     Image.fromarray(depth_vis).save(debug_depth_dir / f"{stem}_depth.png")
+            # -----------------------
+
     logging.info("3DGS 深度渲染完成，数量: %d", len(depth_map))
     return depth_map, color_map
 
@@ -526,15 +749,6 @@ def log_rerun_scene(
         except Exception as exc:  # noqa: BLE001
             logging.warning("rerun 连接失败 (%s): %s", rerun_addr, exc)
 
-    if rerun_save_path:
-        rerun_save_path = Path(rerun_save_path)
-        rerun_save_path.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            rr.save(str(rerun_save_path))
-            logging.info("rerun 日志将保存到: %s", rerun_save_path)
-        except Exception as exc:  # noqa: BLE001
-            logging.warning("保存 rerun 日志失败: %s", exc)
-
     # 整体点云（others）
     if points_all is not None and points_all.shape[0] > 0:
         log_kwargs = {}
@@ -608,6 +822,16 @@ def log_rerun_scene(
     #     )
     #     rr.log(f"cameras/{stem}/image", rr.Image(img_uint8))
 
+    # 在所有 log 操作完成后执行 save
+    if rerun_save_path:
+        rerun_save_path = Path(rerun_save_path)
+        rerun_save_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            rr.save(str(rerun_save_path))
+            logging.info("rerun 日志已保存到: %s", rerun_save_path)
+        except Exception as exc:  # noqa: BLE001
+            logging.warning("保存 rerun 日志失败: %s", exc)
+
 
 def process_scene(
     scene: str,
@@ -627,20 +851,44 @@ def process_scene(
     cam_max_size: int,
 ) -> Path:
     scene_dir = data_root / scene
-    intr_map, c2w_map, scene_type = load_transforms(scene_dir)
+    intr_map, c2w_map, scene_type, size_map, path_map = load_transforms(scene_dir)
     print('scene_type:', scene_type)
-    depth_map, color_map = render_depths_with_gaussians(model_path, iteration)
+
+    # 尝试加载包含 100 张图的 JSON
+    scene_json_path = Path("scene_objects_Qwen3-VL-30B-A3B-Instruct") / f"{scene}.json"
+    image_names = None
+    if scene_json_path.exists():
+        logging.info("加载场景图片列表: %s", scene_json_path)
+        with scene_json_path.open("r", encoding="utf-8") as f:
+            scene_data = json.load(f)
+            per_image = scene_data.get("per_image", {})
+            image_names = set(per_image.keys())
+            logging.info("场景包含 %d 张图片", len(image_names))
+    else:
+        logging.warning("场景图片列表不存在: %s，将渲染所有相机", scene_json_path)
+
+    depth_map, color_map = render_depths_with_gaussians(
+        model_path, iteration, 
+        intr_map=intr_map, c2w_map=c2w_map, 
+        size_map=size_map, path_map=path_map,
+        image_names=image_names
+    )
 
     mask_index_path = mask_root / scene / "mask_index.json"
     with mask_index_path.open("r", encoding="utf-8") as f:
         mask_index = json.load(f)
     items = mask_index.get("items", [])
     mask_score_map: Dict[str, float] = {}
+    mask_to_item: Dict[str, Dict] = {}
     for it in items:
         path = it.get("mask_path")
         score = it.get("score")
         if isinstance(path, str) and isinstance(score, (int, float)):
             mask_score_map[path] = float(score)
+            mask_to_item[path] = it
+
+    # 加载本地 Qwen 模型
+    vlm_model, vlm_processor = load_vlm_model(DEFAULT_VLM_MODEL_PATH)
 
     results: List[Dict] = []
     inst_counter = 1
@@ -694,7 +942,13 @@ def process_scene(
                 continue
 
             depth = depth_map[stem]
-            mask = load_mask(mask_path)
+            # 从 item 中读取 mask_rle，如果不存在则退而求其次加载 PNG
+            if "mask_rle" in item:
+                rle = item["mask_rle"]
+                mask = mask_utils.decode(rle).astype(bool)
+            else:
+                mask = load_mask(mask_path)
+            
             mask = erode_mask(mask, erode_pixels)
             points = mask_depth_to_points(mask, depth, intr_map[stem], c2w_map[stem])
             points = filter_outliers(points)
@@ -733,23 +987,23 @@ def process_scene(
                     extents,
                 )
                 # 检查新 mask 是否与该实例冲突
-                conflict_with_new = any(
-                    share_same_frame(img, next(iter(new_inst["images"])))
-                    for img in inst["images"]
-                )
+                # conflict_with_new = any(
+                #     share_same_frame(img, next(iter(new_inst["images"])))
+                #     for img in inst["images"]
+                # )
                 
-                if overlap and not conflict_with_new:
-                    # 还需要检查：如果要合并这个实例，会不会导致 merge_indices 里的实例互相冲突？
-                    can_merge_with_others = True
-                    for already_selected_idx in merge_indices:
-                        if any(share_same_frame(img1, img2) 
-                               for img1 in instances[already_selected_idx]["images"] 
-                               for img2 in inst["images"]):
-                            can_merge_with_others = False
-                            break
+                # if overlap and not conflict_with_new:
+                #     # 还需要检查：如果要合并这个实例，会不会导致 merge_indices 里的实例互相冲突？
+                #     can_merge_with_others = True
+                #     for already_selected_idx in merge_indices:
+                #         if any(share_same_frame(img1, img2) 
+                #                for img1 in instances[already_selected_idx]["images"] 
+                #                for img2 in inst["images"]):
+                #             can_merge_with_others = False
+                #             break
                     
-                    if can_merge_with_others:
-                        merge_indices.append(idx)
+                if overlap:
+                    merge_indices.append(idx)
 
             if not merge_indices:
                 instances.append(new_inst)
@@ -770,49 +1024,122 @@ def process_scene(
                     orig_n = all_pts.shape[0]
                     idx = np.random.choice(orig_n, instance_max_points, replace=False)
                     all_pts = all_pts[idx]
-                    logging.info("实例合并点云下采样: %d -> %d", orig_n, all_pts.shape[0])
+                    # logging.info("实例合并点云下采样: %d -> %d", orig_n, all_pts.shape[0])
                 merged["obb_transform"], merged["obb_extents"] = compute_obb(all_pts)
                 instances.append(merged)
 
         logging.info("标签 %s 初步合并得到 %d 个实例", label, len(instances))
 
-        # 1. 置信度过滤
+        # 1. 置信度过滤与 VLM 验证
         qualified_instances = []
-        for inst in instances:
-            if any((mask_score_map.get(img) or 0.0) >= 0.9 for img in inst["images"]):
+        for inst in tqdm(instances, desc=f"Verifying {label} instances"):
+            max_score = max((mask_score_map.get(img) or 0.0) for img in inst["images"])
+            # 如果有 mask 分数 >= 0.9，直接保留
+            if max_score >= 0.9:
                 qualified_instances.append(inst)
+                continue
+            
+            # 只验证最高score在0.75和0.9之间的
+            if max_score < 0.75:
+                continue
+
+            # 否则，取分数最高的 mask 进行 VLM 验证
+            highest_conf_mask_path = max(inst["images"], key=lambda img: mask_score_map.get(img, 0.0))
+            item = mask_to_item[highest_conf_mask_path]
+            image_name = item["image"]
+            
+            # 获取原始图片路径
+            if scene_type == "scannetppv2":
+                raw_image_path = data_root / scene / "dslr" / "resized_undistorted_images" / image_name
+            elif scene_type == "dl3dv":
+                raw_image_path = data_root / scene / "dense" / "rgb" / image_name
+            else:
+                raw_image_path = data_root / scene /  "resized_undistorted_images" / image_name
+
+            if not raw_image_path.exists():
+                logging.warning("原始图片不存在，跳过 VLM 验证: %s", raw_image_path)
+                continue
+
+            try:
+                raw_image = Image.open(raw_image_path).convert("RGB")
+                
+                if "mask_rle" in item:
+                    rle = item["mask_rle"]
+                    mask_np = mask_utils.decode(rle).astype(bool)
+                else:
+                    mask_image = Image.open(highest_conf_mask_path).convert("L")
+                    mask_np = np.array(mask_image) > 0
+                
+                # 准备 RLE 和 BBox
+                orig_h, orig_w = mask_np.shape
+                # 如果没有从 item 获取到 rle，则重新编码
+                if "mask_rle" not in item:
+                    rle = mask_utils.encode(np.asfortranarray(mask_np.astype(np.uint8)))
+                    rle['counts'] = rle['counts'].decode('ascii')
+                else:
+                    rle = item["mask_rle"]
+                
+                bbox = mask_utils.toBbox(rle)  # [x, y, w, h]
+                bbox_xyxy = np.array([[bbox[0], bbox[1], bbox[0] + bbox[2], bbox[1] + bbox[3]]])
+
+                # 1. 生成 Zoom-in 图像并获取颜色
+                object_data = {
+                    "labels": [{"noun_phrase": label}],
+                    "segmentation": rle,
+                }
+                zoomed_image, color_hex = render_zoom_in(object_data, raw_image, mask_alpha=0.5)
+
+                # 2. 使用相同颜色生成 Overlay 图像
+                viz = Visualizer(np.array(raw_image))
+                viz.overlay_instances(
+                    boxes=bbox_xyxy,
+                    masks=[rle],
+                    binary_masks=[mask_np],
+                    assigned_colors=[color_hex],
+                    alpha=0.5,
+                )
+                overlay_image = Image.fromarray(viz.output.get_image())
+                
+                if verify_label_with_vlm(vlm_model, vlm_processor, raw_image, overlay_image, zoomed_image, label):
+                    logging.info("VLM 召回了低分实例 (label: %s, highest_score: %.2f, image: %s)", 
+                                 label, mask_score_map.get(highest_conf_mask_path, 0.0), raw_image_path)
+                    qualified_instances.append(inst)
+            except Exception as e:
+                logging.error("VLM 验证过程出错: %s", e)
+                import traceback
+                traceback.print_exc()
 
         # 2. 对同一类别的实例进行二次 overlap 检测 (阈值 0.8)
-        final_instances = []
-        for q_inst in qualified_instances:
-            q_transform = q_inst["obb_transform"]
-            q_extents = q_inst["obb_extents"]
+        # final_instances = []
+        # for q_inst in qualified_instances:
+        #     q_transform = q_inst["obb_transform"]
+        #     q_extents = q_inst["obb_extents"]
             
-            merged = False
-            for f_idx, f_inst in enumerate(final_instances):
-                # 如果重叠度 > 0.8，则融合
-                if obb_overlap(q_transform, q_extents, f_inst["obb_transform"], f_inst["obb_extents"], intersect_ratio=0.8):
-                    f_inst["points"].extend(q_inst["points"])
-                    f_inst["images"] |= q_inst["images"]
-                    # 合并 mask 编码
-                    if "mask_encodings" not in f_inst:
-                        f_inst["mask_encodings"] = {}
-                    if "mask_encodings" in q_inst:
-                        f_inst["mask_encodings"].update(q_inst["mask_encodings"])
+        #     merged = False
+        #     for f_idx, f_inst in enumerate(final_instances):
+        #         # 如果重叠度 > 0.8，则融合
+        #         if obb_overlap(q_transform, q_extents, f_inst["obb_transform"], f_inst["obb_extents"], intersect_ratio=0.8):
+        #             f_inst["points"].extend(q_inst["points"])
+        #             f_inst["images"] |= q_inst["images"]
+        #             # 合并 mask 编码
+        #             if "mask_encodings" not in f_inst:
+        #                 f_inst["mask_encodings"] = {}
+        #             if "mask_encodings" in q_inst:
+        #                 f_inst["mask_encodings"].update(q_inst["mask_encodings"])
                     
-                    # 重新计算融合后的 OBB
-                    all_pts = np.concatenate(f_inst["points"], axis=0)
-                    if instance_max_points > 0 and all_pts.shape[0] > instance_max_points:
-                        idx = np.random.choice(all_pts.shape[0], instance_max_points, replace=False)
-                        all_pts = all_pts[idx]
-                    f_inst["obb_transform"], f_inst["obb_extents"] = compute_obb(all_pts)
-                    merged = True
-                    break
+        #             # 重新计算融合后的 OBB
+        #             all_pts = np.concatenate(f_inst["points"], axis=0)
+        #             if instance_max_points > 0 and all_pts.shape[0] > instance_max_points:
+        #                 idx = np.random.choice(all_pts.shape[0], instance_max_points, replace=False)
+        #                 all_pts = all_pts[idx]
+        #             f_inst["obb_transform"], f_inst["obb_extents"] = compute_obb(all_pts)
+        #             merged = True
+        #             break
             
-            if not merged:
-                final_instances.append(q_inst)
-
-        logging.info("标签 %s 最终过滤与二次合并后剩余 %d 个实例", label, len(final_instances))
+        #     if not merged:
+        #         final_instances.append(q_inst)
+        final_instances = qualified_instances 
+        logging.info("标签 %s 最终过滤与vlm召回后剩余 %d 个实例", label, len(qualified_instances))
 
         # 3. 记录最终结果
         for inst in final_instances:
@@ -824,7 +1151,24 @@ def process_scene(
             # 准备 mask 编码，按 images 顺序排序
             mask_encodings_dict = inst.get("mask_encodings", {})
             mask_encodings_list = []
-            for img_path in sorted(inst["images"]):
+            
+            sorted_images = sorted(inst["images"])
+            
+            # 使用相对路径保存图像路径 (相对于当前运行目录，通常是项目根目录)
+            def to_rel(p):
+                try:
+                    # 如果已经是相对路径则直接返回，否则转为相对于当前目录的路径
+                    if os.path.isabs(p):
+                        return os.path.relpath(p, os.getcwd())
+                    return p
+                except Exception:
+                    return str(p)
+
+            rel_images = [to_rel(img) for img in sorted_images]
+            highest_conf_mask = max(inst["images"], key=lambda img: mask_score_map.get(img, 0.0))
+            rel_highest_conf_mask = to_rel(highest_conf_mask)
+
+            for img_path in sorted_images:
                 if img_path in mask_encodings_dict:
                     mask_encodings_list.append(mask_encodings_dict[img_path])
             
@@ -835,8 +1179,8 @@ def process_scene(
                     "bounding_box": bbox,
                     "obb_transform": transform.tolist(),
                     "obb_extents": extents.tolist(),
-                    "images": sorted(inst["images"]),
-                    "highest_confidence_mask": max(inst["images"], key=lambda img: mask_score_map.get(img, 0.0)),
+                    "images": rel_images,
+                    "highest_confidence_mask": rel_highest_conf_mask,
                     "mask_encodings": mask_encodings_list,
                 }
             )
@@ -963,8 +1307,14 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
-    setup_logger()
+    setup_logger()  # 初始控制台输出
     args = parse_args()
+    
+    # 重新配置日志到文件 logging/scene_name.json
+    log_dir = Path("logging")
+    log_file = log_dir / f"{args.scene}.json"
+    setup_logger(log_file)
+    logging.info("日志已同步保存至: %s", log_file)
     
     # 如果启用了 rerun 且未指定保存路径，自动设置为 output_dir/scene.rrd
     rerun_save_path = args.rerun_save_rrd

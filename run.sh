@@ -55,10 +55,62 @@ if [ ${#SCENES[@]} -eq 0 ]; then
     exit 0
 fi
 
+# 初始化状态记录文件
+STATUS_JSON="3d_bounding_scannet.json"
+export ALL_SCENES_STR="${SCENES[*]}"
+python - <<PY
+import json
+import os
+from pathlib import Path
+
+scenes = os.environ.get("ALL_SCENES_STR", "").split()
+status_file = "${STATUS_JSON}"
+
+existing_status = {}
+if os.path.exists(status_file):
+    try:
+        with open(status_file, "r") as f:
+            existing_status = json.load(f)
+    except Exception:
+        pass
+
+status_data = {}
+# 首先同步当前发现的所有需要处理的场景
+for s in scenes:
+    if existing_status.get(s) == "completed":
+        status_data[s] = "completed"
+    else:
+        status_data[s] = "pending"
+
+# 保留旧状态文件中已完成但可能不在当前 SCENES 里的场景记录
+for s, status in existing_status.items():
+    if s not in status_data:
+        status_data[s] = status
+
+with open(status_file, "w") as f:
+    json.dump(status_data, f, indent=2)
+PY
+
+# 更新状态的辅助函数
+update_status() {
+    local scene="$1"
+    local status="$2"
+    python - <<PY
+import json
+import os
+with open("${STATUS_JSON}", "r+") as f:
+    data = json.load(f)
+    data["${scene}"] = "${status}"
+    f.seek(0)
+    json.dump(data, f, indent=2)
+    f.truncate()
+PY
+}
+
 # 并行配置
-GPU_IDS=(0 1) # 指定可用的 GPU 编号
+GPU_IDS=(0 1 2 3 4 5 6 7) # 指定可用的 GPU 编号
 GPU_COUNT=${#GPU_IDS[@]}
-MAX_PARALLEL=4    # 总并行进程数
+MAX_PARALLEL=8   # 总并行进程数
 
 # 初始化 GPU 令牌桶，用于管理每个 GPU 的任务分配
 TOKEN_DIR=$(mktemp -d)
@@ -80,10 +132,13 @@ process_scene() {
         for f in "${TOKEN_DIR}"/slot_*; do
             [ -e "$f" ] || continue
             token=$(basename "$f")
-            # 尝试抢占令牌（将文件重命名为 .busy）
+            # 跳过已经在忙碌中的令牌
+            if [[ "$token" == *.busy ]]; then continue; fi
+            
+            # 尝试抢占令牌
             if mv "$f" "${TOKEN_DIR}/${token}.busy" 2>/dev/null; then
-                # 提取 GPU ID
-                gpu_id=$(echo "$token" | sed 's/.*_gpu_//')
+                # 提取 GPU ID (只取数字部分)
+                gpu_id=$(echo "$token" | sed 's/.*_gpu_\([0-9]*\).*/\1/')
                 break 2
             fi
         done
@@ -91,37 +146,51 @@ process_scene() {
     done
 
     echo "=== Processing scene: ${scene} on GPU ${gpu_id} ==="
+    update_status "${scene}" "running"
     
     # 设置当前进程使用的 GPU
     export CUDA_VISIBLE_DEVICES="${gpu_id}"
     
-    # 在 mindcube 环境下跑 classic.py
-    conda run -n mindcube python classic.py \
-        --data-root "${DATA_ROOT}" --scene "${scene}"
+    local success=true
+
+    # 既然环境已激活，直接使用 python 运行
+    python classic.py --data-root "${DATA_ROOT}" --scene "${scene}"
     if [ $? -ne 0 ]; then
         echo "❌ Error: classic.py failed for scene ${scene} on GPU ${gpu_id}"
+        success=false
     fi
 
-    # 在 Octree 环境下跑 sam3 + 3d_bounding_instance_gs_rerun.py
-    conda run -n mindcube python sam3.py \
-        --scene-json "scene_objects_Qwen3-VL-30B-A3B-Instruct/${scene}.json"
+    python sam3.py --scene-json "scene_objects_Qwen3-VL-30B-A3B-Instruct/${scene}.json"
     if [ $? -ne 0 ]; then
         echo "❌ Error: sam3.py failed for scene ${scene} on GPU ${gpu_id}"
+        success=false
     fi
 
-    conda run -n Octree python 3d_bounding_instance_gs_rerun.py \
-        --scene "${scene}" -m "${OUTPUT_ROOT}/${scene}"
+    python 3d_bounding_instance_gs_rerun.py --scene "${scene}" -m "${OUTPUT_ROOT}/${scene}"
     if [ $? -ne 0 ]; then
         echo "❌ Error: 3d_bounding_instance_gs_rerun.py failed for scene ${scene} on GPU ${gpu_id}"
+        success=false
     fi
     
-    echo "✓ Completed scene: ${scene} on GPU ${gpu_id}"
+    if [ "$success" = true ]; then
+        echo "✓ Completed scene: ${scene} on GPU ${gpu_id}"
+        update_status "${scene}" "completed"
+    else
+        update_status "${scene}" "failed"
+    fi
 
     # 释放令牌，归还到池中
     mv "${TOKEN_DIR}/${token}.busy" "${TOKEN_DIR}/${token}"
 }
 
 for scene in "${SCENES[@]}"; do
+    # 检测 3d_bounding_scannet.json 中的状态，如果是 completed 则跳过
+    status=$(python -c "import json; print(json.load(open('${STATUS_JSON}')).get('${scene}', 'pending'))")
+    if [ "$status" = "completed" ]; then
+        echo ">>> Skipping already completed scene (from status JSON): ${scene}"
+        continue
+    fi
+
     process_scene "${scene}" &
     
     # 限制总并行任务数量（等待令牌机制实际上已经限制了，但这里保留以保持逻辑清晰）

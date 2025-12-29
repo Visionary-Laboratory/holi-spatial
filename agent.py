@@ -62,7 +62,7 @@ def load_vlm_model(model_path: str):
     logging.info("加载 VLM 模型: %s", model_path)
     model = AutoModelForVision2Seq.from_pretrained(
         model_path,
-        torch_dtype="auto",
+        torch_dtype=torch.bfloat16,
         attn_implementation="flash_attention_2",
         device_map="auto",
     )
@@ -136,18 +136,40 @@ def prepare_sam_response(
 def build_validation_messages(
     raw_image: Image.Image, overlay_image: Image.Image, category: str
 ) -> List[Dict]:
+
+
     prompt = (
-        "You are a helpful assistant specializing in detail-oriented visual understanding, "
-        "reasoning, and classification, capable of carefully analyzing a predicted "
-        "segmentation mask on an image along with the area around the predicted "
-        "segmentation mask to determine whether the object covered by the predicted "
-        "segmentation mask is one of the correct masks that match the user query. "
-        "You will see two images: the first is the original, the second is the SAM "
-        "overlay for the given category. Mask numbers are the indices (starting from 1). "
-        f'The category is \"{category}\". Return only the correct indices for this category, '
-        "sorted ascending and comma-separated. If none apply, return \"none\". "
-        "Do not output any extra text."
-    )
+    "You are a visual label verifier for a single masked object.\n"
+    "You will be given two images: (1) the original image, and (2) a black-and-white mask image.\n"
+    "In the mask image, WHITE pixels indicate the target object region; BLACK pixels are background.\n"
+    f'The user-provided label/category to verify is: "{category}".\n\n'
+
+    "Task:\n"
+    "Decide whether the given label correctly describes the object indicated by the WHITE mask region.\n"
+    "If it is correct, ACCEPT. If it is incorrect (wrong category), REJECT and provide the correct label you believe fits best.\n\n"
+
+    "Guidelines (consistency-and-rewrite mindset):\n"
+    "1) Focus ONLY on the object covered by the WHITE mask region. Ignore other objects outside the mask.\n"
+    "2) Identify the core visible noun/object class of the masked object (the best label).\n"
+    "3) Treat extra modifiers in the label (color/material/size/position/relations) as constraints ONLY if they are clearly visible.\n"
+    "   If modifiers are wrong or unverifiable but the core object class is correct, still ACCEPT.\n"
+    "4) If the mask covers only a part of an object but the object class is still clear, judge by the most likely full object.\n"
+    "5) If the masked region is ambiguous, too small, or does not correspond to a recognizable object, REJECT and set predicted_label to \"unknown\".\n"
+    "6) Use common-sense synonyms/hypernyms: accept reasonable equivalents (e.g., \"sofa\" vs \"couch\").\n"
+    "   If the label is too specific and not verifiable (e.g., exact brand/model/species), prefer a more general correct label.\n\n"
+
+    "Output format (VERY IMPORTANT):\n"
+    "Return ONLY a JSON object on a single line with these keys:\n"
+    "  - decision: \"ACCEPT\" or \"REJECT\"\n"
+    "  - predicted_label: a short English noun phrase for the masked object class (e.g., \"chair\", \"person\", \"car\").\n"
+    "Rules:\n"
+    "  - If decision is ACCEPT, predicted_label should be exactly the provided label (category) or its closest normalized form.\n"
+    "  - If decision is REJECT, predicted_label must be your best guess of the correct label, or \"unknown\" if unclear.\n"
+    "Do not output any extra text."
+)
+
+
+
     return [
         {
             "role": "user",
@@ -299,6 +321,9 @@ def process_scene(
 
     for image_idx, (image_name, categories) in enumerate(tqdm(items, desc="处理图片")):
         image_path = image_root / image_name
+        if image_name != "DSC01860.JPG"  and image_name !="DSC01810.JPG":
+            continue
+
         if not image_path.exists():
             logging.warning("图片不存在，跳过: %s", image_path)
             missing_images.append(image_name)

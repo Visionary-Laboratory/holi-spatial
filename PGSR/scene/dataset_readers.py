@@ -229,7 +229,12 @@ def readCamerasFromTransforms(path, transformsfile, white_background, images=Non
             frames = contents["frames"]
         fl_x = contents["fl_x"]
         fl_y = contents["fl_y"]
+
         for idx, frame in enumerate(frames):
+            if len(frames) > 2000:
+                if idx%2 == 0:
+                    continue
+
             cam_name = os.path.join(reading_dir, frame["file_path"])
 
             # NeRF 'transform_matrix' is a camera-to-world transform

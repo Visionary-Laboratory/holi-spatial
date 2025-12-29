@@ -7,6 +7,7 @@ SCENES=(
     # "020312de8d"
     # "00a231a370"
     # "02c2ddee2a"
+    "1K/0a6c01ac3212768772f8f6eca86314c72d5ca320c3e3def148ddaceab23c07f4"
 )
 
 DATA_ROOT="DL3DV"
@@ -33,7 +34,7 @@ for scene in "${SCENES[@]}"; do
     fi
 
     conda run -n Octree python 3d_bounding_instance_gs_rerun.py \
-        --scene "${scene}" -m "${OUTPUT_ROOT}/${scene}"
+        --scene "${scene}" -m "${OUTPUT_ROOT}/${scene}" --data-root "${DATA_ROOT}" 
     if [ $? -ne 0 ]; then
         echo "❌ Error: 3d_bounding_instance_gs_rerun.py failed for scene ${scene}, continuing..."
     fi
