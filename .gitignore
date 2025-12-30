@@ -58,3 +58,5 @@ train_pgsr_progress_dl3dv.json.lock
 train_pgsr_progress_dl3dv.json
 train_pgsr_progress.json.lock
 train_pgsr_progress.json
+__pycache__/api.cpython-312.pyc
+rerun_output
