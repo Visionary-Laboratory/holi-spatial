@@ -62,8 +62,10 @@ def infer_depth_path(image_path: str) -> str | None:
         return infer_depth_path_scannetppv2(image_path)
     elif "dense" in parts and "rgb" in parts:
         return infer_depth_path_dense(image_path)
+    elif "color" in parts:
+        return infer_depth_path_scannet(image_path)
     else:
-        raise NotImplementedError(f"目前只支持对scannet++和dl3dv自动推断depth路径.")
+        raise NotImplementedError(f"目前只支持对scannet++、dl3dv和scannet自动推断depth路径.")
 
 def infer_depth_path_scannetppv2(image_path: str) -> str | None:
     """
@@ -96,6 +98,17 @@ def infer_depth_path_dense(image_path: str) -> str | None:
     p = Path(image_path)
     depth_path = p.parent.parent / "depth_da3" / f"{p.stem}.npy"
     os.path.exists(depth_path)
+    return str(depth_path)
+
+def infer_depth_path_scannet(image_path: str) -> str | None:
+    """
+    根据 scannet 路径推断对应的 depth_da3 npy 路径。
+    例: /.../scannet/scans_test/scene0707_00/color/00000.jpg
+        -> /.../scannet/scans_test/scene0707_00/depth_da3/00000.npy
+    """
+    p = Path(image_path)
+    # 将 "color" 替换为 "depth_da3"，将扩展名替换为 ".npy"
+    depth_path = p.parent.parent / "depth_da3" / f"{p.stem}.npy"
     return str(depth_path)
 
 class Camera(nn.Module):

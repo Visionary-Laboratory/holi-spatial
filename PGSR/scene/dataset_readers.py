@@ -427,6 +427,104 @@ def readDL3DVCameras(path, images_folder="rgb"):
     
     return cam_infos
 
+def readScannetCameras(path, images_folder="color"):
+    """
+    Read cameras from ScanNet format
+    ScanNet structure:
+    - cam/ directory: contains .npz files with intrinsics and pose
+    - color/ directory: contains image files (.jpg)
+    """
+    cam_infos = []
+    
+    cam_dir = os.path.join(path, "cam")
+    image_dir = os.path.join(path, images_folder)
+
+    if not os.path.exists(cam_dir):
+        raise ValueError(f"ScanNet cam directory not found: {cam_dir}")
+    if not os.path.exists(image_dir):
+        raise ValueError(f"ScanNet image directory not found: {image_dir}")
+    
+    # Get list of camera files
+    cam_files = sorted([f for f in os.listdir(cam_dir) if f.endswith('.npz')])
+    
+    for idx, cam_file in tqdm(
+        enumerate(cam_files),
+        total=len(cam_files),
+    ):
+        cam_file_path = os.path.join(cam_dir, cam_file)
+        image_name = cam_file.replace('.npz', '')
+        
+        # Try to find image file
+        image_file = os.path.join(image_dir, f"{image_name}.jpg")
+        if not os.path.exists(image_file):
+            image_file = os.path.join(image_dir, f"{image_name}.png")
+        if not os.path.exists(image_file):
+            print(f"Warning: Image not found for camera {cam_file}, skipping")
+            continue
+        
+        try:
+            # Load camera parameters from .npz file
+            cam_data = np.load(cam_file_path)
+            
+            # Extract intrinsics - ScanNet uses 'intrinsics' (plural)
+            if 'intrinsics' in cam_data:
+                intrinsics = cam_data['intrinsics']
+                fx = intrinsics[0, 0]
+                fy = intrinsics[1, 1]
+                cx = intrinsics[0, 2]
+                cy = intrinsics[1, 2]
+            else:
+                raise ValueError(f"No intrinsics found in {cam_file}. Available keys: {list(cam_data.keys())}")
+            
+            # Load image to get dimensions
+            image = Image.open(image_file)
+            width, height = image.size
+            
+            # Convert focal length to FoV
+            FovX = focal2fov(fx, width)
+            FovY = focal2fov(fy, height)
+            
+            # Extract extrinsics
+            # 'pose' is the camera-to-world matrix (C2W)
+            c2w = cam_data['pose']
+            
+            # Convert to world-to-camera (W2C)
+            w2c = np.linalg.inv(c2w)
+            
+            # Extract R and T
+            # R should be transposed for the format expected by Camera class
+            R = np.transpose(w2c[:3, :3])
+            T = w2c[:3, 3]
+            
+            cam_info = CameraInfo(
+                uid=idx,
+                global_id=idx,
+                R=R,
+                T=T,
+                FovY=FovY,
+                FovX=FovX,
+                image_path=image_file,
+                image_name=image_name,
+                width=width,
+                height=height,
+                fx=fx,
+                fy=fy,
+            )
+            
+            # Release memory
+            image.close()
+            image = None
+            
+            cam_infos.append(cam_info)
+            
+        except Exception as e:
+            print(f"Error loading camera {cam_file}: {e}")
+            import traceback
+            traceback.print_exc()
+            continue
+    
+    return cam_infos
+
 def readDL3DVSceneInfo(path, images="rgb", eval=False, llffhold=8, ply_path="pointcloud_da3.ply"):
     """
     Read scene information from DL3DV format
@@ -463,8 +561,54 @@ def readDL3DVSceneInfo(path, images="rgb", eval=False, llffhold=8, ply_path="poi
     )
     return scene_info
 
+def readScannetSceneInfo(path, images="color", eval=False, llffhold=8, ply_path=None):
+    """
+    Read scene information from ScanNet format
+    """
+    cam_infos_unsorted = readScannetCameras(path, images_folder=images)
+    cam_infos = sorted(cam_infos_unsorted.copy(), key=lambda x: x.image_name)
+    
+    if eval:
+        train_cam_infos = [c for idx, c in enumerate(cam_infos) if idx % llffhold != 0]
+        test_cam_infos = [c for idx, c in enumerate(cam_infos) if idx % llffhold == 0]
+    else:
+        train_cam_infos = cam_infos
+        test_cam_infos = []
+    
+    nerf_normalization = getNerfppNorm(train_cam_infos)
+    
+    # For ScanNet, look for PLY file in the scene directory
+    if ply_path is None:
+        # Try to find PLY file with pattern *_vh_clean_2.ply
+        ply_files = [f for f in os.listdir(path) if f.endswith('_vh_clean_2.ply')]
+        if ply_files:
+            ply_path = os.path.join(path, ply_files[0])
+        else:
+            # Fallback: look for any .ply file
+            ply_files = [f for f in os.listdir(path) if f.endswith('.ply')]
+            if ply_files:
+                ply_path = os.path.join(path, ply_files[0])
+    
+    if ply_path and os.path.exists(ply_path):
+        try:
+            pcd = fetchPly(ply_path)
+        except:
+            pcd = None
+    else:
+        pcd = None
+    
+    scene_info = SceneInfo(
+        point_cloud=pcd,
+        train_cameras=train_cam_infos,
+        test_cameras=test_cam_infos,
+        nerf_normalization=nerf_normalization,
+        ply_path=ply_path if ply_path and os.path.exists(ply_path) else None,
+    )
+    return scene_info
+
 sceneLoadTypeCallbacks = {
     "Colmap": readColmapSceneInfo,
     "Blender" : readNerfSyntheticInfo,
     "DL3DV": readDL3DVSceneInfo,
+    "scannet": readScannetSceneInfo,
 }

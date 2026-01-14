@@ -43,10 +43,15 @@ class Scene:
         self.train_cameras = {}
         self.test_cameras = {}
 
-        if os.path.exists(os.path.join(args.source_path, "dense/rgb")) and os.path.exists(os.path.join(args.source_path, "dense/cam")):  # DL3DV format
+        if os.path.exists(os.path.join(args.source_path, "cam")) and os.path.exists(os.path.join(args.source_path, "color")):  # ScanNet format
+            scene_info = sceneLoadTypeCallbacks["scannet"](
+                args.source_path, "color", args.eval, ply_path
+            )
+        elif os.path.exists(os.path.join(args.source_path, "dense/rgb")) and os.path.exists(os.path.join(args.source_path, "dense/cam")):  # DL3DV format
             scene_info = sceneLoadTypeCallbacks["DL3DV"](
                 args.source_path, "rgb", args.eval, ply_path
             )
+        
         elif os.path.exists(os.path.join(args.source_path, "sparse")):
             scene_info = sceneLoadTypeCallbacks["Colmap"](args.source_path, args.images, args.eval)
         elif os.path.exists(os.path.join(args.source_path, "transforms_undistorted.json")):
@@ -56,8 +61,12 @@ class Scene:
             assert False, "Could not recognize scene type!"
 
         if not self.loaded_iter:
-            with open(scene_info.ply_path, 'rb') as src_file, open(os.path.join(self.model_path, "input.ply") , 'wb') as dest_file:
-                dest_file.write(src_file.read())
+            # 只有当 ply_path 存在时才复制点云文件
+            if scene_info.ply_path and os.path.exists(scene_info.ply_path):
+                with open(scene_info.ply_path, 'rb') as src_file, open(os.path.join(self.model_path, "input.ply") , 'wb') as dest_file:
+                    dest_file.write(src_file.read())
+            else:
+                print(f"警告: ply_path 为 None 或文件不存在，跳过复制点云文件。将使用随机初始化或从已训练模型加载。")
             json_cams = []
             camlist = []
             if scene_info.test_cameras:

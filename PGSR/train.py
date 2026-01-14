@@ -198,14 +198,15 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
 
         Ll1depth_pure = 0.0
-        if depth_l1_weight(iteration) > 0:
-            Depth = render_pkg['plane_depth']
-            mono_invdepth = viewpoint_cam.depth_map.cuda()
-            # depth_mask = viewpoint_cam.depth_mask.cuda()
+        if viewpoint_cam.depth_map is not None:
+            if depth_l1_weight(iteration) > 0:
+                Depth = render_pkg['plane_depth']
+                mono_invdepth = viewpoint_cam.depth_map.cuda()
+                # depth_mask = viewpoint_cam.depth_mask.cuda()
 
-            Ll1depth_pure = torch.abs((Depth  - mono_invdepth) ).mean()
-            Ll1depth = depth_l1_weight(iteration) * Ll1depth_pure 
-            loss += Ll1depth
+                Ll1depth_pure = torch.abs((Depth  - mono_invdepth) ).mean()
+                Ll1depth = depth_l1_weight(iteration) * Ll1depth_pure 
+                loss += Ll1depth
 
 
 
