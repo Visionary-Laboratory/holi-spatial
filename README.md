@@ -14,4 +14,4 @@
 ## Todo List
 
 - [ ] We release the Holi-Spatial project code! Check out the repository for more details.
-- [ ] We releaseall model checkpoints.
+- [ ] We release all model checkpoints.
