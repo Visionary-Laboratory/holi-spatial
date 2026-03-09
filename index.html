@@ -1,0 +1,997 @@
+<!DOCTYPE html>
+<html lang="en" class="scroll-smooth">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Holi-Spatial | Holistic Spatial Intelligence</title>
+  <link rel="icon" href="3d_visualize/favicon.svg" type="image/svg+xml" />
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet" />
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://unpkg.com/three@0.161.0/build/three.module.js",
+        "three/examples/jsm/": "https://unpkg.com/three@0.161.0/examples/jsm/"
+      }
+    }
+  </script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          fontFamily: { sans: ['Inter', 'system-ui', 'sans-serif'] }
+        }
+      }
+    }
+  </script>
+  <style>
+    body {
+      background-color: #0a0a0f;
+      background-image: radial-gradient(circle, rgba(255,255,255,0.03) 1px, transparent 1px);
+      background-size: 24px 24px;
+    }
+    .gradient-text {
+      background: linear-gradient(135deg, #818cf8, #a78bfa, #c084fc);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+    }
+    .glass-card {
+      background: rgba(255, 255, 255, 0.06);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+    }
+    .glass-blur {
+      backdrop-filter: blur(16px);
+      -webkit-backdrop-filter: blur(16px);
+    }
+    .glass-card-hover:hover {
+      transform: translateY(-4px);
+      box-shadow: 0 8px 32px rgba(99, 102, 241, 0.08);
+    }
+    .card-highlight {
+      border-color: rgba(99, 102, 241, 0.35) !important;
+      box-shadow: 0 0 24px rgba(99, 102, 241, 0.08);
+    }
+
+    /* 3D Viewer */
+    .viewer-card canvas {
+      display: block;
+      width: 100%;
+      height: 100%;
+    }
+    /* Force compact OBJ viewport height across old/new class names */
+    .viewer-card .h-\[420px\],
+    .viewer-card .h-\[320px\],
+    .viewer-card .h-\[280px\] {
+      height: 280px !important;
+    }
+    .viewer-overlay {
+      position: absolute;
+      inset: 0;
+      display: grid;
+      place-items: center;
+      background: rgba(10, 10, 15, 0.55);
+      color: rgba(255, 255, 255, 0.86);
+      font-size: 0.8rem;
+      transition: opacity 200ms ease;
+    }
+    .viewer-overlay--hidden {
+      opacity: 0;
+      pointer-events: none;
+    }
+    .spinner {
+      width: 24px;
+      height: 24px;
+      border-radius: 999px;
+      border: 2px solid rgba(255, 255, 255, 0.15);
+      border-top-color: rgba(129, 140, 248, 0.9);
+      animation: spin 0.8s linear infinite;
+      margin: 0 auto 8px;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* Lightbox */
+    .lightbox {
+      position: fixed;
+      inset: 0;
+      background: rgba(10, 10, 15, 0.9);
+      backdrop-filter: blur(8px);
+      display: grid;
+      place-items: center;
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.25s ease;
+      z-index: 1000;
+    }
+    .lightbox.open {
+      opacity: 1;
+      pointer-events: auto;
+    }
+    .lightbox img {
+      max-width: min(92vw, 1200px);
+      max-height: 86vh;
+      border-radius: 1rem;
+      border: 1px solid rgba(99, 102, 241, 0.3);
+      box-shadow: 0 24px 70px rgba(0, 0, 0, 0.6);
+    }
+
+    /* Hero mosaic video background */
+    .hero-section {
+      position: relative;
+      overflow: hidden;
+    }
+    #app {
+      width: 100%;
+    }
+    .app-root {
+      width: 100%;
+    }
+    .page-container {
+      width: 100%;
+      max-width: 1400px;
+      margin: 0 auto;
+      padding-top: 4rem;
+    }
+    .hero {
+      position: relative;
+      overflow: hidden;
+      min-height: 80vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      text-align: center;
+      padding: 3.5rem 1.5rem 2rem;
+      border-radius: 1.25rem;
+      margin: 0 1.5rem;
+    }
+    .hero-mosaic-video {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+      object-position: center center;
+      filter: saturate(1.15) contrast(1.05) brightness(0.72);
+    }
+    .hero-vignette {
+      position: absolute;
+      inset: 0;
+      background:
+        linear-gradient(to bottom,
+          rgba(10, 10, 15, 0.55) 0%,
+          rgba(10, 10, 15, 0.25) 18%,
+          rgba(10, 10, 15, 0.12) 32%,
+          rgba(10, 10, 15, 0.12) 62%,
+          rgba(10, 10, 15, 0.35) 78%,
+          rgba(10, 10, 15, 0.85) 100%
+        ),
+        radial-gradient(ellipse at center,
+          rgba(10, 10, 15, 0.45) 0%,
+          transparent 58%
+        );
+      pointer-events: none;
+    }
+    .hero-edge-blur {
+      position: absolute;
+      inset: 0;
+      backdrop-filter: blur(14px);
+      -webkit-backdrop-filter: blur(14px);
+      -webkit-mask-image: radial-gradient(ellipse at center, transparent 56%, black 100%);
+      mask-image: radial-gradient(ellipse at center, transparent 56%, black 100%);
+      pointer-events: none;
+      z-index: 1;
+    }
+    .hero-content {
+      position: relative;
+      z-index: 2;
+    }
+    .hero-stats-glass {
+      background: rgba(10, 10, 15, 0.32);
+      border: 1px solid rgba(255, 255, 255, 0.15);
+      border-radius: 1rem;
+      backdrop-filter: blur(16px);
+      -webkit-backdrop-filter: blur(16px);
+      box-shadow: 0 20px 60px rgba(0, 0, 0, 0.35);
+      padding: 1.1rem 1.25rem;
+    }
+
+    /* Hero entrance animation (CSS-only, no JS dependency) */
+    @keyframes heroFadeUp {
+      from { opacity: 0; transform: translateY(1.5rem); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+    .hero-animate {
+      animation: heroFadeUp 0.8s ease forwards;
+    }
+    .hero-animate-1 { animation-delay: 0.1s; opacity: 0; }
+    .hero-animate-2 { animation-delay: 0.25s; opacity: 0; }
+    .hero-animate-3 { animation-delay: 0.4s; opacity: 0; }
+    .hero-animate-4 { animation-delay: 0.55s; opacity: 0; }
+    .hero-animate-5 { animation-delay: 0.7s; opacity: 0; }
+
+    /* Scroll animation for below-fold sections */
+    .animate-on-scroll {
+      opacity: 1;
+      transform: translateY(0);
+    }
+    .js-animations .animate-on-scroll {
+      opacity: 0;
+      transform: translateY(2rem);
+      transition: opacity 0.6s ease, transform 0.6s ease;
+    }
+    .js-animations .animate-on-scroll.visible {
+      opacity: 1;
+      transform: translateY(0);
+    }
+
+    /* Scene baselines carousel (shows 3 at a time) */
+    .scene-baselines {
+      display: flex;
+      gap: 12px;
+      overflow-x: auto;
+      scroll-snap-type: x mandatory;
+      scroll-behavior: smooth;
+      -webkit-overflow-scrolling: touch;
+      scrollbar-width: none;
+      -ms-overflow-style: none;
+    }
+    .scene-baselines::-webkit-scrollbar { display: none; }
+    .scene-baselines > .viewer-card {
+      width: calc(33.333% - 8px);
+      flex-shrink: 0;
+      scroll-snap-align: start;
+    }
+
+    /* Hide carousel scrollbar */
+    #qa-carousel::-webkit-scrollbar { display: none; }
+
+    /* Mobile nav */
+    .mobile-menu {
+      transform: translateX(100%);
+      transition: transform 0.3s ease;
+    }
+    .mobile-menu.open {
+      transform: translateX(0);
+    }
+
+    /* ── CSS Variables ── */
+    :root {
+      --bg: #0a0a0f;
+      --text: #f1f5f9;
+      --text-muted: #94a3b8;
+      --text-dim: #64748b;
+      --accent: #818cf8;
+      --border: rgba(255, 255, 255, 0.05);
+      --glass: rgba(255, 255, 255, 0.03);
+    }
+
+    /* ── Video Gallery ── */
+    .gallery-section {
+      position: relative;
+      z-index: 1;
+      padding: 7rem clamp(1.5rem, 6vw, 4rem) 4rem;
+    }
+    .authors-section {
+      padding: 2.25rem clamp(1.5rem, 6vw, 4rem) 0;
+    }
+    .authors-card {
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 1.5rem 1.75rem;
+      text-align: center;
+      background: rgba(255, 255, 255, 0.03);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 1.25rem;
+      backdrop-filter: blur(16px);
+      -webkit-backdrop-filter: blur(16px);
+      box-shadow: 0 18px 50px rgba(0, 0, 0, 0.22);
+    }
+    .authors-names {
+      font-size: 0.98rem;
+      line-height: 1.9;
+      color: var(--text);
+    }
+    .authors-meta {
+      margin-top: 0.7rem;
+      font-size: 0.84rem;
+      color: var(--text-muted);
+    }
+    .authors-affiliations {
+      margin-top: 0.85rem;
+      font-size: 0.82rem;
+      line-height: 1.9;
+      color: var(--text-dim);
+    }
+    .section-header {
+      text-align: center;
+      margin-bottom: 3rem;
+      max-width: 640px;
+      margin-inline: auto;
+    }
+    .section-eyebrow {
+      font-size: 0.72rem;
+      text-transform: uppercase;
+      letter-spacing: 0.2em;
+      color: var(--accent);
+      margin-bottom: 0.8rem;
+    }
+    .section-title {
+      font-size: clamp(1.5rem, 3vw, 2.2rem);
+      font-weight: 700;
+      letter-spacing: -0.02em;
+      margin-bottom: 0.6rem;
+      color: var(--text);
+    }
+    .section-description {
+      font-size: 0.92rem;
+      color: var(--text-muted);
+      line-height: 1.6;
+    }
+    .section-stat-line {
+      margin-top: 0.8rem;
+      font-size: 0.82rem;
+      color: var(--text-dim);
+    }
+    .section-stat-line strong {
+      color: var(--accent);
+    }
+    .video-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+      gap: 1.2rem;
+      max-width: 1200px;
+      margin: 0 auto;
+    }
+    .video-card {
+      position: relative;
+      border-radius: 1rem;
+      overflow: hidden;
+      background: var(--glass);
+      border: 1px solid var(--border);
+      cursor: pointer;
+      transition: transform 0.3s ease, box-shadow 0.3s ease, border-color 0.3s ease;
+    }
+    .video-card:hover {
+      transform: translateY(-4px);
+      border-color: rgba(129, 140, 248, 0.3);
+      box-shadow: 0 8px 32px rgba(99, 102, 241, 0.1);
+    }
+    .video-wrapper {
+      position: relative;
+      aspect-ratio: 16 / 9;
+      overflow: hidden;
+    }
+    .video-wrapper video {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      filter: brightness(0.9) saturate(1.1);
+      transition: transform 0.3s ease, filter 0.3s ease;
+    }
+    .video-card:hover .video-wrapper video {
+      transform: scale(1.03);
+      filter: brightness(1) saturate(1.15);
+    }
+    .video-overlay {
+      position: absolute;
+      inset: 0;
+      background: radial-gradient(circle at center, transparent 30%, rgba(10, 10, 15, 0.6));
+      opacity: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: opacity 0.3s ease;
+    }
+    .video-card:hover .video-overlay { opacity: 1; }
+    .video-play-icon {
+      width: 44px;
+      height: 44px;
+      border-radius: 999px;
+      border: 1px solid rgba(255, 255, 255, 0.8);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: rgba(255, 255, 255, 0.9);
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+    }
+    .video-play-icon svg {
+      width: 18px;
+      height: 18px;
+      fill: #0a0a0f;
+      transform: translateX(1px);
+    }
+    .video-meta {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0.65rem 0.85rem 0.75rem;
+      font-size: 0.8rem;
+    }
+    .video-title { font-weight: 500; }
+    .video-tag {
+      padding: 0.18rem 0.55rem;
+      border-radius: 999px;
+      border: 1px solid var(--border);
+      font-size: 0.68rem;
+      text-transform: uppercase;
+      letter-spacing: 0.14em;
+      color: var(--text-dim);
+      background: var(--glass);
+    }
+    .gallery-footer {
+      margin-top: 2rem;
+      text-align: center;
+      font-size: 0.78rem;
+      color: var(--text-dim);
+    }
+    .feature-grid {
+      margin-top: 2.5rem;
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 1rem;
+      max-width: 1200px;
+      margin-left: auto;
+      margin-right: auto;
+    }
+    .feature-card {
+      background: rgba(255, 255, 255, 0.03);
+      border: 1px solid rgba(255, 255, 255, 0.06);
+      border-radius: 1rem;
+      padding: 1.25rem;
+      text-align: left;
+    }
+    .feature-card h3 {
+      color: #f1f5f9;
+      font-size: 0.98rem;
+      font-weight: 600;
+      margin-bottom: 0.45rem;
+    }
+    .feature-card p {
+      color: #94a3b8;
+      font-size: 0.86rem;
+      line-height: 1.5;
+    }
+
+    /* ── Details Slider ── */
+    .details-section {
+      position: relative;
+      z-index: 1;
+      padding: 4rem clamp(1.5rem, 5vw, 3rem) 4.5rem;
+      border-top: 1px solid var(--border);
+    }
+    .details-slider-wrap {
+      position: relative;
+      max-width: 1200px;
+      margin: 0 auto;
+      overflow: hidden;
+    }
+    .details-slider {
+      display: flex;
+      transition: transform 0.45s cubic-bezier(0.25, 0.46, 0.45, 0.94);
+      will-change: transform;
+    }
+    .details-slide {
+      flex: 0 0 100%;
+      width: 100%;
+      min-width: 0;
+      padding: 0 0.5rem;
+    }
+    .details-slide-inner {
+      border-radius: 1rem;
+      overflow: hidden;
+      background: var(--glass);
+      border: 1px solid var(--border);
+      box-shadow: 0 16px 48px rgba(0, 0, 0, 0.3);
+    }
+    .details-slide-title {
+      padding: 0.9rem 1.2rem;
+      font-size: 0.95rem;
+      font-weight: 600;
+      letter-spacing: 0.06em;
+      color: var(--text);
+      border-bottom: 1px solid var(--border);
+      text-align: center;
+    }
+    .details-videos {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 0;
+      aspect-ratio: 32 / 9;
+      min-height: 280px;
+    }
+    .details-video-cell {
+      position: relative;
+      overflow: hidden;
+      background: #0a0a0f;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .details-video-cell video {
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+      object-position: center center;
+      display: block;
+    }
+    .details-video-cell .video-overlay {
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.3s ease;
+    }
+    .details-video-cell:hover .video-overlay {
+      opacity: 1;
+    }
+    .details-video-label {
+      position: absolute;
+      bottom: 0;
+      left: 0;
+      right: 0;
+      padding: 0.5rem 0.75rem;
+      font-size: 0.72rem;
+      text-transform: uppercase;
+      letter-spacing: 0.12em;
+      color: var(--text-dim);
+      background: linear-gradient(to top, rgba(10, 10, 15, 0.95), transparent);
+    }
+    .details-nav {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 1.5rem;
+      margin-top: 2rem;
+    }
+    .details-arrow {
+      appearance: none;
+      border: 1px solid rgba(148, 163, 184, 0.4);
+      border-radius: 999px;
+      width: 40px;
+      height: 40px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      background: var(--glass);
+      color: var(--text-muted);
+      cursor: pointer;
+      font-size: 1.2rem;
+      line-height: 1;
+      transition: all 0.2s;
+    }
+    .details-arrow:hover {
+      background: rgba(129, 140, 248, 0.15);
+      color: var(--text);
+      border-color: rgba(129, 140, 248, 0.4);
+    }
+    .details-arrow:disabled {
+      opacity: 0.3;
+      cursor: not-allowed;
+    }
+    .details-dots {
+      display: flex;
+      gap: 0.5rem;
+      align-items: center;
+    }
+    .details-dot {
+      width: 9px;
+      height: 9px;
+      border-radius: 999px;
+      border: 1px solid rgba(148, 163, 184, 0.5);
+      background: transparent;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+    .details-dot:hover {
+      background: rgba(148, 163, 184, 0.3);
+    }
+    .details-dot.is-active {
+      background: var(--accent);
+      border-color: var(--accent);
+      transform: scale(1.2);
+    }
+    .details-hint {
+      margin-top: 1rem;
+      font-size: 0.76rem;
+      color: var(--text-dim);
+      text-align: center;
+    }
+
+    /* ── Video Modal ── */
+    .modal-backdrop {
+      position: fixed;
+      inset: 0;
+      background: rgba(10, 10, 15, 0.94);
+      backdrop-filter: blur(16px);
+      display: none;
+      align-items: center;
+      justify-content: center;
+      padding: 1.5rem;
+      z-index: 60;
+    }
+    .modal-backdrop.is-open { display: flex; }
+    .modal {
+      width: min(1100px, 100%);
+      border-radius: 1rem;
+      background: #0a0a0f;
+      border: 1px solid var(--border);
+      box-shadow: 0 24px 80px rgba(0, 0, 0, 0.8);
+      overflow: hidden;
+    }
+    .modal video {
+      width: 100%;
+      max-height: min(70vh, 640px);
+      display: block;
+      background: #0a0a0f;
+    }
+    .modal-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0.7rem 1rem;
+      border-top: 1px solid var(--border);
+      font-size: 0.8rem;
+      color: var(--text-muted);
+    }
+    .modal-title { color: var(--text); font-weight: 500; }
+    .modal-close {
+      appearance: none;
+      border: 1px solid rgba(148, 163, 184, 0.4);
+      border-radius: 999px;
+      background: var(--glass);
+      color: var(--text-muted);
+      width: 1.8rem;
+      height: 1.8rem;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      font-size: 1.1rem;
+      line-height: 1;
+      transition: all 0.2s;
+    }
+    .modal-close:hover {
+      background: rgba(255, 255, 255, 0.08);
+      border-color: rgba(255, 255, 255, 0.2);
+      color: var(--text);
+    }
+
+    /* ── Responsive (Gallery + Details) ── */
+    @media (max-width: 768px) {
+      .authors-section { padding-top: 1.5rem; }
+      .authors-card { padding: 1.1rem 1rem; }
+      .authors-names { font-size: 0.88rem; line-height: 1.75; }
+      .authors-affiliations { font-size: 0.76rem; line-height: 1.7; }
+      .feature-grid { grid-template-columns: 1fr; }
+      .details-videos {
+        grid-template-columns: 1fr;
+        aspect-ratio: 16 / 9;
+      }
+      .details-section { padding-inline: 1.2rem; }
+    }
+  </style>
+</head>
+<body class="font-sans text-slate-300 antialiased">
+
+  <!-- ===== NAVIGATION ===== -->
+  <nav class="fixed top-0 w-full z-50 bg-black/60 backdrop-blur-xl border-b border-white/5">
+    <div class="max-w-7xl mx-auto px-6 h-16 flex items-center justify-between">
+      <a href="#" class="flex items-center gap-2 text-lg font-bold text-white">
+        <span class="w-7 h-7 rounded-lg bg-gradient-to-br from-indigo-500 to-violet-500 flex items-center justify-center text-xs">◇</span>
+        Holi-Spatial
+      </a>
+      <div class="hidden md:flex items-center gap-8">
+        <a href="#gallery" class="text-sm text-slate-400 hover:text-white transition">Video Gallery</a>
+        <a href="#details" class="text-sm text-slate-400 hover:text-white transition">Geometric Visualization</a>
+        <a href="#3d-demo" class="text-sm text-slate-400 hover:text-white transition">3D Demo</a>
+        <a href="#qa-gallery" class="text-sm text-slate-400 hover:text-white transition">QA Gallery</a>
+      </div>
+      <div class="hidden md:flex items-center gap-3">
+        <a href="https://github.com/Visionary-Laboratory/Holi-Spatial" class="px-4 py-2 text-sm font-semibold text-indigo-300 rounded-lg border border-indigo-500/30 hover:bg-indigo-500/10 transition-all">
+          Code
+        </a>
+        <a href="#" class="px-4 py-2 text-sm font-semibold text-white rounded-lg bg-gradient-to-r from-indigo-500 to-violet-500 shadow-lg shadow-indigo-500/25 hover:shadow-indigo-500/40 transition-all">
+          Paper
+        </a>
+      </div>
+      <button class="md:hidden text-white" id="menu-toggle" aria-label="Menu">
+        <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16"/></svg>
+      </button>
+    </div>
+  </nav>
+
+  <!-- Mobile Menu -->
+  <div class="mobile-menu fixed inset-y-0 right-0 w-64 z-50 bg-[#0a0a0f]/95 backdrop-blur-xl border-l border-white/5 p-8 flex flex-col gap-6 md:hidden" id="mobile-menu">
+    <button class="self-end text-slate-400 hover:text-white" id="menu-close" aria-label="Close">
+      <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
+    </button>
+    <a href="#gallery" class="text-slate-300 hover:text-white transition">Video Gallery</a>
+    <a href="#details" class="text-slate-300 hover:text-white transition">Geometric Visualization</a>
+    <a href="#3d-demo" class="text-slate-300 hover:text-white transition">3D Demo</a>
+    <a href="#qa-gallery" class="text-slate-300 hover:text-white transition">QA Gallery</a>
+    <a href="https://github.com/Visionary-Laboratory/Holi-Spatial" class="text-indigo-300 hover:text-indigo-200 transition">Code</a>
+    <a href="#" class="text-indigo-300 hover:text-indigo-200 transition">Paper</a>
+  </div>
+  <div class="fixed inset-0 bg-black/50 z-40 hidden" id="menu-backdrop"></div>
+
+  <div id="app">
+    <div class="app-root">
+      <main class="page-container">
+  <section class="hero" style="--hero-height: 457px;">
+    <video class="hero-mosaic-video" src="./after/hero-mosaic.mp4" autoplay muted loop playsinline></video>
+    <div class="hero-vignette"></div>
+    <div class="hero-edge-blur"></div>
+    <div class="max-w-7xl mx-auto text-center hero-content">
+      <h1 class="text-5xl md:text-7xl font-bold tracking-tight leading-tight gradient-text hero-animate hero-animate-2">
+        Holi-Spatial
+      </h1>
+      <p class="text-xl md:text-2xl text-white font-light mt-6 max-w-3xl mx-auto hero-animate hero-animate-3">
+        Evolving Video Streams into Holistic 3D Spatial Intelligence
+      </p>
+      <div class="mt-10 flex flex-col sm:flex-row gap-4 justify-center hero-animate hero-animate-4">
+        <a href="#" class="px-8 py-3.5 text-white font-semibold rounded-xl bg-gradient-to-r from-indigo-500 to-violet-500 shadow-lg shadow-indigo-500/25 hover:shadow-indigo-500/40 hover:-translate-y-0.5 transition-all">
+          Paper
+        </a>
+        <a href="https://github.com/Visionary-Laboratory/Holi-Spatial" class="px-8 py-3.5 text-indigo-300 font-semibold rounded-xl border border-indigo-500/30 hover:bg-indigo-500/10 transition-all">
+          Code
+        </a>
+        <a href="#gallery" class="px-8 py-3.5 text-indigo-300 font-semibold rounded-xl border border-indigo-500/30 hover:bg-indigo-500/10 transition-all">
+          Data (coming soon)
+        </a>
+        <a href="#qa-gallery" class="px-8 py-3.5 text-indigo-300 font-semibold rounded-xl border border-indigo-500/30 hover:bg-indigo-500/10 transition-all">
+          Benchmark (coming soon)
+        </a>
+      </div>
+      <div class="mt-14 grid grid-cols-2 md:grid-cols-3 gap-8 max-w-3xl mx-auto hero-animate hero-animate-5 hero-stats-glass">
+        <div>
+          <div class="text-4xl font-bold text-white">13K+</div>
+          <div class="text-sm text-slate-500 mt-1">Scenes</div>
+        </div>
+        <div>
+          <div class="text-4xl font-bold text-white">1.3M+</div>
+          <div class="text-sm text-slate-500 mt-1">QA Pairs</div>
+        </div>
+        <div>
+          <div class="text-4xl font-bold text-white">0.3M+</div>
+          <div class="text-sm text-slate-500 mt-1">3D BBoxes</div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="authors-section" aria-label="Authors">
+    <div class="authors-card">
+      <div class="authors-names">
+        Yuanyuan Gao<sup>1, 2*</sup>, Hao Li<sup>2, 5*</sup>, Yifei Liu<sup>1, 6*</sup>, Xinhao Ji<sup>1, 4*</sup>, Yuning Gong<sup>1, 7*</sup>,
+        Yuanjun Liao<sup>7</sup>, Fangfu Liu<sup>8</sup>, Manyuan Zhang<sup>9</sup>, Yuchen Yang<sup>10</sup>, Dan Xu<sup>11</sup>,
+        Xue Yang<sup>3</sup>, Huaxi Huang<sup>1</sup>, Hongjie Zhang<sup>1</sup>, Ziwei Liu<sup>5</sup>, Xiao Sun<sup>1</sup>,
+        Dingwen Zhang<sup>2,&dagger;</sup>, Zhihang Zhong<sup>3,&dagger;</sup>
+      </div>
+      <div class="authors-meta">
+        * Equal Contribution &nbsp;&middot;&nbsp; &dagger; Corresponding Authors
+      </div>
+      <div class="authors-affiliations">
+        <span class="inline-block mx-2"><sup>1</sup> Shanghai AI Lab</span>
+        <span class="inline-block mx-2"><sup>2</sup> Northwestern Polytechnical University</span>
+        <span class="inline-block mx-2"><sup>3</sup> Shanghai Jiao Tong University</span>
+        <span class="inline-block mx-2"><sup>4</sup> Peking University</span>
+        <span class="inline-block mx-2"><sup>5</sup> Nanyang Technological University</span>
+        <span class="inline-block mx-2"><sup>6</sup> Beihang University</span>
+        <span class="inline-block mx-2"><sup>7</sup> Sichuan University</span>
+        <span class="inline-block mx-2"><sup>8</sup> Tsinghua University</span>
+        <span class="inline-block mx-2"><sup>9</sup> The Chinese University of Hong Kong</span>
+        <span class="inline-block mx-2"><sup>10</sup> Fudan University</span>
+        <span class="inline-block mx-2"><sup>11</sup> Hong Kong University of Science and Technology</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===== VIDEO GALLERY ===== -->
+  <section id="gallery" class="gallery-section">
+    <div id="videoGrid" class="video-grid">
+      <article class="video-card" data-video-src="./after/c9ab/c9abde4c4b.mp4" data-video-label="c9ab">
+        <div class="video-wrapper">
+          <video src="./after/c9ab/c9abde4c4b.mp4" muted loop playsinline data-autoplay-managed="true" preload="metadata"></video>
+          <div class="video-overlay"><div class="video-play-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14l11-7z"></path></svg></div></div>
+        </div>
+        <div class="video-meta"><div class="video-title">c9ab</div><div class="video-tag">Clip 1</div></div>
+      </article>
+      <article class="video-card" data-video-src="./after/0645/0645-1.mp4" data-video-label="0645-1">
+        <div class="video-wrapper">
+          <video src="./after/0645/0645-1.mp4" muted loop playsinline data-autoplay-managed="true" preload="metadata"></video>
+          <div class="video-overlay"><div class="video-play-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14l11-7z"></path></svg></div></div>
+        </div>
+        <div class="video-meta"><div class="video-title">0645-1</div><div class="video-tag">Clip 2</div></div>
+      </article>
+      <article class="video-card" data-video-src="./after/07b/07b-1.mp4" data-video-label="07b-1">
+        <div class="video-wrapper">
+          <video src="./after/07b/07b-1.mp4" muted loop playsinline data-autoplay-managed="true" preload="metadata"></video>
+          <div class="video-overlay"><div class="video-play-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14l11-7z"></path></svg></div></div>
+        </div>
+        <div class="video-meta"><div class="video-title">07b-1</div><div class="video-tag">Clip 3</div></div>
+      </article>
+      <article class="video-card" data-video-src="./after/0572/0572-1.mp4" data-video-label="0572-1">
+        <div class="video-wrapper">
+          <video src="./after/0572/0572-1.mp4" muted loop playsinline data-autoplay-managed="true" preload="metadata"></video>
+          <div class="video-overlay"><div class="video-play-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14l11-7z"></path></svg></div></div>
+        </div>
+        <div class="video-meta"><div class="video-title">0572-1</div><div class="video-tag">Clip 4</div></div>
+      </article>
+      <article class="video-card" data-video-src="./after/0570/0570-1.mp4" data-video-label="0570-1">
+        <div class="video-wrapper">
+          <video src="./after/0570/0570-1.mp4" muted loop playsinline data-autoplay-managed="true" preload="metadata"></video>
+          <div class="video-overlay"><div class="video-play-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14l11-7z"></path></svg></div></div>
+        </div>
+        <div class="video-meta"><div class="video-title">0570-1</div><div class="video-tag">Clip 5</div></div>
+      </article>
+      <article class="video-card" data-video-src="./after/0602/0602-1.mp4" data-video-label="0602-1">
+        <div class="video-wrapper">
+          <video src="./after/0602/0602-1.mp4" muted loop playsinline data-autoplay-managed="true" preload="metadata"></video>
+          <div class="video-overlay"><div class="video-play-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14l11-7z"></path></svg></div></div>
+        </div>
+        <div class="video-meta"><div class="video-title">0602-1</div><div class="video-tag">Clip 6</div></div>
+      </article>
+      <article class="video-card" data-video-src="./after/394a5/394a5-1.mp4" data-video-label="394a5-1">
+        <div class="video-wrapper">
+          <video src="./after/394a5/394a5-1.mp4" muted loop playsinline data-autoplay-managed="true" preload="metadata"></video>
+          <div class="video-overlay"><div class="video-play-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14l11-7z"></path></svg></div></div>
+        </div>
+        <div class="video-meta"><div class="video-title">394a5-1</div><div class="video-tag">Clip 7</div></div>
+      </article>
+      <article class="video-card" data-video-src="./after/0567/0567-1.mp4" data-video-label="0567-1">
+        <div class="video-wrapper">
+          <video src="./after/0567/0567-1.mp4" muted loop playsinline data-autoplay-managed="true" preload="metadata"></video>
+          <div class="video-overlay"><div class="video-play-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14l11-7z"></path></svg></div></div>
+        </div>
+        <div class="video-meta"><div class="video-title">0567-1</div><div class="video-tag">Clip 8</div></div>
+      </article>
+    </div>
+    <div class="feature-grid">
+      <article class="feature-card">
+        <h3>Unified Video Stream Modeling</h3>
+        <p>Integrates continuous egocentric clips into coherent spatial trajectories for holistic scene understanding.</p>
+      </article>
+      <article class="feature-card">
+        <h3>Grounding + Depth Coupling</h3>
+        <p>Jointly analyzes object grounding and depth estimation to expose cross-view consistency and failure cases.</p>
+      </article>
+      <article class="feature-card">
+        <h3>Benchmark-Driven Evaluation</h3>
+        <p>Connects visual evidence to downstream spatial QA, enabling robust and interpretable model comparison.</p>
+      </article>
+    </div>
+    <div class="gallery-footer">Click any video to play fullscreen.</div>
+  </section>
+
+  <!-- ===== DETAILS SHOWCASE ===== -->
+  <section id="details" class="details-section" aria-label="Detail Showcase">
+    <header class="section-header">
+      <div class="section-eyebrow">Detail Showcase</div>
+      <h2 class="section-title">Geometric Visualization</h2>
+      <p class="section-description">
+        Visualize scene geometry through synchronized 3D grounding and depth estimation.
+        Swipe or click dots to explore different scenes.
+      </p>
+    </header>
+    <div class="details-slider-wrap">
+      <div id="detailsSlider" class="details-slider" role="region" aria-label="Scene slider"></div>
+    </div>
+    <div class="details-nav">
+      <button type="button" id="detailsPrev" class="details-arrow" aria-label="Previous">&lsaquo;</button>
+      <div id="detailsDots" class="details-dots" role="tablist"></div>
+      <button type="button" id="detailsNext" class="details-arrow" aria-label="Next">&rsaquo;</button>
+    </div>
+    <p class="details-hint">Swipe or click dots to switch &middot; Videos play in sync</p>
+  </section>
+
+  <!-- ===== 3D SCENE COMPARISON ===== -->
+  <section id="3d-demo" class="py-24 md:py-32 px-6">
+    <div class="max-w-7xl mx-auto">
+      <div class="text-center mb-12 animate-on-scroll">
+        <p class="text-sm uppercase tracking-widest text-indigo-400 mb-4">3D Visualization</p>
+        <h2 class="text-3xl md:text-5xl font-bold text-white">Mesh Comparison</h2>
+        <p class="text-lg text-slate-400 mt-4 max-w-2xl mx-auto">
+          Compare lightweight base-plus-delta scene geometry across methods. Drag to rotate, scroll to zoom.
+        </p>
+      </div>
+
+      <div class="animate-on-scroll">
+        <div class="flex gap-3 items-start">
+          <div class="flex-[3] relative min-w-0">
+            <button class="scene-prev absolute left-2 top-1/2 -translate-y-1/2 z-10 w-9 h-9 rounded-full bg-black/50 backdrop-blur-sm border border-white/10 text-white flex items-center justify-center hover:bg-black/70 transition cursor-pointer" data-target="baselines-all">
+              <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"/></svg>
+            </button>
+            <button class="scene-next absolute right-2 top-1/2 -translate-y-1/2 z-10 w-9 h-9 rounded-full bg-black/50 backdrop-blur-sm border border-white/10 text-white flex items-center justify-center hover:bg-black/70 transition cursor-pointer" data-target="baselines-all">
+              <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/></svg>
+            </button>
+            <div class="scene-baselines" id="baselines-0a7cc"></div>
+            <div class="scene-baselines mt-4" id="baselines-09d6e808b4"></div>
+          </div>
+          <div class="flex-1 min-w-0 space-y-3">
+            <div id="ours-0a7cc"></div>
+            <div id="ours-09d6e808b4"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===== QA GALLERY ===== -->
+  <section id="qa-gallery" class="py-24 md:py-32 px-6 relative overflow-hidden">
+    <div class="absolute inset-0 pointer-events-none" aria-hidden="true">
+      <div class="absolute top-[5%] left-[0%] w-[600px] h-[600px] rounded-full bg-indigo-500/[0.15] blur-[120px]"></div>
+      <div class="absolute bottom-[5%] right-[5%] w-[500px] h-[500px] rounded-full bg-violet-500/[0.12] blur-[100px]"></div>
+      <div class="absolute top-[40%] left-[45%] w-[500px] h-[400px] rounded-full bg-purple-500/[0.08] blur-[80px]"></div>
+    </div>
+    <div class="max-w-7xl mx-auto relative">
+      <div class="text-center mb-16 animate-on-scroll">
+        <p class="text-sm uppercase tracking-widest text-indigo-400 mb-4">Spatial QA</p>
+        <h2 class="text-3xl md:text-5xl font-bold text-white">Spatial QA Demonstration</h2>
+        <p class="text-lg text-slate-400 mt-4 max-w-3xl mx-auto">
+          Comprehensive spatial intelligence QA data covering camera motion, object relations,
+          and camera-object interactions — capturing diverse spatial reasoning tasks across real indoor scenes.
+        </p>
+      </div>
+
+      <!-- Carousel: one card per QA type, horizontally scrollable -->
+      <div class="relative animate-on-scroll">
+        <button id="carousel-prev" class="absolute left-0 top-1/2 -translate-y-1/2 -translate-x-4 z-10 w-10 h-10 rounded-full bg-white/[0.06] border border-white/10 backdrop-blur-xl text-white flex items-center justify-center hover:bg-white/[0.12] transition hidden md:flex cursor-pointer">
+          <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"/></svg>
+        </button>
+        <button id="carousel-next" class="absolute right-0 top-1/2 -translate-y-1/2 translate-x-4 z-10 w-10 h-10 rounded-full bg-white/[0.06] border border-white/10 backdrop-blur-xl text-white flex items-center justify-center hover:bg-white/[0.12] transition hidden md:flex cursor-pointer">
+          <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/></svg>
+        </button>
+        <div id="qa-carousel" class="flex gap-5 overflow-x-auto scroll-smooth snap-x snap-mandatory pb-4 -mx-2 px-2" style="scrollbar-width:none;-ms-overflow-style:none;-webkit-overflow-scrolling:touch"></div>
+        <div id="carousel-dots" class="flex justify-center gap-2 mt-6"></div>
+      </div>
+    </div>
+  </section>
+      </main>
+    </div>
+  </div>
+
+  <!-- ===== VIDEO MODAL ===== -->
+  <div id="videoModalBackdrop" class="modal-backdrop" role="dialog" aria-modal="true">
+    <div class="modal">
+      <video id="modalVideo" controls playsinline></video>
+      <div class="modal-header">
+        <span id="modalTitle" class="modal-title"></span>
+        <button id="modalClose" class="modal-close" aria-label="Close">&times;</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== LIGHTBOX ===== -->
+  <div id="lightbox" class="lightbox" aria-hidden="true">
+    <button class="absolute top-6 right-6 bg-white/5 border border-white/10 text-white text-xs uppercase tracking-widest px-4 py-2 rounded-full hover:bg-white/10 transition cursor-pointer" id="lightbox-close" aria-label="Close image">
+      Close
+    </button>
+    <img id="lightbox-image" alt="Expanded view" />
+  </div>
+
+  <!-- ===== FOOTER ===== -->
+  <footer class="border-t border-white/5 py-12 px-6 bg-black/40">
+    <div class="max-w-7xl mx-auto flex flex-col md:flex-row items-center justify-between gap-6">
+      <div class="flex items-center gap-2">
+        <span class="w-6 h-6 rounded-md bg-gradient-to-br from-indigo-500 to-violet-500 flex items-center justify-center text-[10px] text-white">◇</span>
+        <span class="text-lg font-bold text-white">Holi-Spatial</span>
+      </div>
+      <div class="flex gap-6">
+        <a href="#gallery" class="text-sm text-slate-500 hover:text-white transition">Video Gallery</a>
+        <a href="#details" class="text-sm text-slate-500 hover:text-white transition">Geometric Visualization</a>
+        <a href="#3d-demo" class="text-sm text-slate-500 hover:text-white transition">3D Demo</a>
+        <a href="#qa-gallery" class="text-sm text-slate-500 hover:text-white transition">QA Gallery</a>
+        <a href="#" class="text-sm text-slate-500 hover:text-white transition">Paper</a>
+        <a href="https://github.com/Visionary-Laboratory/Holi-Spatial" class="text-sm text-slate-500 hover:text-white transition">Code</a>
+      </div>
+    </div>
+    <p class="text-sm text-slate-600 text-center mt-8">&copy; 2026 Holi-Spatial. All rights reserved.</p>
+  </footer>
+
+  <!-- ===== SCRIPTS ===== -->
+  <script src="qa_visualize/data.js"></script>
+  <script src="app.js"></script>
+  <script type="module" src="viewer.js"></script>
+
+</body>
+</html>

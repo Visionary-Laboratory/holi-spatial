@@ -1,0 +1,41 @@
+{
+  "sceneId": "0a7cc",
+  "baseFaces": 205946,
+  "variants": [
+    {
+      "key": "GT",
+      "source": "scene_with_bbox_0a7cc_GT.obj",
+      "deltaFaces": 8512,
+      "deltaVertices": 3552,
+      "reconstructFaces": 214458
+    },
+    {
+      "key": "spatialllm",
+      "source": "scene_with_bbox_0a7cc_spatialllm.obj",
+      "deltaFaces": 1344,
+      "deltaVertices": 560,
+      "reconstructFaces": 207290
+    },
+    {
+      "key": "ss",
+      "source": "scene_with_bbox_0a7cc_ss.obj",
+      "deltaFaces": 2472,
+      "deltaVertices": 1030,
+      "reconstructFaces": 208418
+    },
+    {
+      "key": "llava3d",
+      "source": "scene_with_bbox_0a7cc_llava3d.obj",
+      "deltaFaces": 8544,
+      "deltaVertices": 3560,
+      "reconstructFaces": 214490
+    },
+    {
+      "key": "ours",
+      "source": "scene_with_bbox_0a7cc_ours.obj",
+      "deltaFaces": 10440,
+      "deltaVertices": 4348,
+      "reconstructFaces": 216386
+    }
+  ]
+}

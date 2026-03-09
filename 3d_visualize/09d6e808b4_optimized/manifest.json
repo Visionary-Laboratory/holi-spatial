@@ -1,0 +1,36 @@
+{
+  "sceneId": "09d6e808b4",
+  "base": "base.obj",
+  "variants": [
+    {
+      "title": "GT",
+      "badge": "GT",
+      "key": "GT",
+      "delta": "delta_GT.obj"
+    },
+    {
+      "title": "SpLLM",
+      "badge": "spllm",
+      "key": "spllm",
+      "delta": "delta_spllm.obj"
+    },
+    {
+      "title": "SS",
+      "badge": "ss",
+      "key": "ss",
+      "delta": "delta_ss.obj"
+    },
+    {
+      "title": "LLaVA3D",
+      "badge": "llava3d",
+      "key": "llava3d",
+      "delta": "delta_llava3d.obj"
+    },
+    {
+      "title": "Ours",
+      "badge": "ours",
+      "key": "ours",
+      "delta": "delta_ours.obj"
+    }
+  ]
+}

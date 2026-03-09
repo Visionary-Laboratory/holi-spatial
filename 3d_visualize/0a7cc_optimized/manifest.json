@@ -1,0 +1,36 @@
+{
+  "sceneId": "0a7cc",
+  "base": "base.obj",
+  "variants": [
+    {
+      "title": "GT",
+      "badge": "GT",
+      "key": "GT",
+      "delta": "delta_GT.obj"
+    },
+    {
+      "title": "SpatialLLM",
+      "badge": "spatialllm",
+      "key": "spatialllm",
+      "delta": "delta_spatialllm.obj"
+    },
+    {
+      "title": "SS",
+      "badge": "ss",
+      "key": "ss",
+      "delta": "delta_ss.obj"
+    },
+    {
+      "title": "LLaVA3D",
+      "badge": "llava3d",
+      "key": "llava3d",
+      "delta": "delta_llava3d.obj"
+    },
+    {
+      "title": "Ours",
+      "badge": "ours",
+      "key": "ours",
+      "delta": "delta_ours.obj"
+    }
+  ]
+}

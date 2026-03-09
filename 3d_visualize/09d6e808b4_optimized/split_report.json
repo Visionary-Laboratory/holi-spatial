@@ -1,0 +1,41 @@
+{
+  "sceneId": "09d6e808b4",
+  "baseFaces": 340617,
+  "variants": [
+    {
+      "key": "GT",
+      "source": "09d6e808b4_GT.obj",
+      "deltaFaces": 4224,
+      "deltaVertices": 1760,
+      "reconstructFaces": 344841
+    },
+    {
+      "key": "spllm",
+      "source": "09d6e808b4_spllm.obj",
+      "deltaFaces": 1344,
+      "deltaVertices": 560,
+      "reconstructFaces": 341961
+    },
+    {
+      "key": "ss",
+      "source": "09d6e808b4_ss.obj",
+      "deltaFaces": 2688,
+      "deltaVertices": 1120,
+      "reconstructFaces": 343305
+    },
+    {
+      "key": "llava3d",
+      "source": "09d6e808b4_llava3d.obj",
+      "deltaFaces": 3744,
+      "deltaVertices": 1560,
+      "reconstructFaces": 344361
+    },
+    {
+      "key": "ours",
+      "source": "09d6e808b4_ours.obj",
+      "deltaFaces": 8104,
+      "deltaVertices": 3372,
+      "reconstructFaces": 348721
+    }
+  ]
+}
