@@ -6,7 +6,7 @@
 
 <p align="center">
   <a href="https://github.com/Visionary-Laboratory/Holi-Spatial"><img src="https://img.shields.io/badge/arXiv-xxx.xxxxx-b31b1b.svg" alt="arXiv"></a>
-  <a href="https://github.com/Visionary-Laboratory/Holi-Spatial"><img src="https://img.shields.io/badge/Website-Project-blue" alt="Website"></a>
+  <a href="https://visionary-laboratory.github.io/Holi-Spatial/"><img src="https://img.shields.io/badge/Website-Project-blue" alt="Website"></a>
   <a href="https://github.com/Visionary-Laboratory/Holi-Spatial"><img src="https://img.shields.io/badge/Dataset-Holi--Spatial-green" alt="Dataset"></a>
   <a href="https://github.com/Visionary-Laboratory/Holi-Spatial"><img src="https://img.shields.io/badge/Model-Holi--Spatial-orange" alt="Model"></a>
 </p>
