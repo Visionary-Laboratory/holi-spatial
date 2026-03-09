@@ -14,5 +14,7 @@
 ## Todo List
 
 
+- [ ] We release the project page of Holi-Spatial, check on [here](https://visionary-laboratory.github.io/Holi-Spatial/).
 - [ ] We release the Holi-Spatial project code! Check out the repository for more details.
+- [ ] We release the subset of Holi-Spatial dataset.
 - [ ] We release all model checkpoints.
