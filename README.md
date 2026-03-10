@@ -9,6 +9,7 @@
   <a href="https://visionary-laboratory.github.io/holi-spatial/"><img src="https://img.shields.io/badge/Website-Project-blue" alt="Website"></a>
   <a href="https://github.com/Visionary-Laboratory/holi-spatial"><img src="https://img.shields.io/badge/Dataset-Holi--Spatial-green" alt="Dataset"></a>
   <a href="https://github.com/Visionary-Laboratory/holi-spatial"><img src="https://img.shields.io/badge/Model-Holi--Spatial-orange" alt="Model"></a>
+  <a href="https://huggingface.co/papers/2603.07660"><img src="https://img.shields.io/badge/HuggingFace-Paper-yellow" alt="HuggingFace Paper"></a>
 </p>
 
 ## Todo List
