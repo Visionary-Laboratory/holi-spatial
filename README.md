@@ -19,4 +19,5 @@
 - [ ] We release the Holi-Spatial project code! Check out the repository for more details.
 - [ ] We release the subset of Holi-Spatial dataset.
 - [ ] We release all model checkpoints.
+
 📢 All code, datasets, and model checkpoints will be fully released before April 1.
