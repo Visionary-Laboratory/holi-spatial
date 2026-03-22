@@ -220,13 +220,16 @@ def verify_label_with_vlm(
 
 def load_transforms(scene_dir: Path, image_names: Optional[set[str]] = None) -> Tuple[Dict[str, np.ndarray], Dict[str, np.ndarray], str, Dict[str, Tuple[int, int]], Dict[str, str], Dict[str, np.ndarray]]:
     """
-    读取 nerfstudio transforms_undistorted.json，返回
+    读取相机与图像路径，返回
       intr_map[stem] = 3x3 K
       c2w_map[stem] = 4x4 camera-to-world
-      scene_type: str
+      scene_type: str（scannetppv2 / dl3dv / scannet）
       size_map[stem] = (width, height)
-      path_map[stem] = image_path
-      mask_map[stem] = image mask (0/1, bool array)
+      path_map[stem] = image路径
+      mask_map[stem] = image mask (bool)
+
+    支持：ScanNet++ nerfstudio、DL3DV、ScanNet v2（color + intrinsic + pose）、
+    ScanNet 变体（cam npz + color）。
     """
     # scannetppv2
     if (scene_dir/"dslr").exists():
@@ -354,8 +357,74 @@ def load_transforms(scene_dir: Path, image_names: Optional[set[str]] = None) -> 
             
         logging.info("加载位姿完成，数量: %d", len(intr_map))
         return intr_map, c2w_map, scene_type, size_map, path_map, mask_map
-    # scannet
-    elif (scene_dir/"cam").exists() and (scene_dir/"color").exists():
+    # ScanNet v2 官方结构: color/, intrinsic/intrinsic_color.txt, pose/*.txt
+    # 需在 cam+color 分支之前，避免与仅有 cam npz 的变体混淆
+    elif (
+        (scene_dir / "color").exists()
+        and (scene_dir / "intrinsic").exists()
+        and (scene_dir / "pose").exists()
+    ):
+        scene_type = "scannet"
+        rgb_dir = scene_dir / "color"
+        pose_dir = scene_dir / "pose"
+        intrinsic_dir = scene_dir / "intrinsic"
+        intr_file = intrinsic_dir / "intrinsic_color.txt"
+        if not intr_file.exists():
+            intr_file = intrinsic_dir / "intrinsic_depth.txt"
+        if not intr_file.exists():
+            raise FileNotFoundError(f"Intrinsic file not found in {intrinsic_dir}")
+        intr_4x4 = np.loadtxt(str(intr_file), dtype=np.float32)
+        if intr_4x4.size == 16:
+            intr_4x4 = intr_4x4.reshape(4, 4)
+        K = intr_4x4[:3, :3].astype(np.float32)
+
+        intr_map: Dict[str, np.ndarray] = {}
+        c2w_map: Dict[str, np.ndarray] = {}
+        size_map: Dict[str, Tuple[int, int]] = {}
+        path_map: Dict[str, str] = {}
+        mask_map: Dict[str, np.ndarray] = {}
+        mask_dir = scene_dir / "mask"
+
+        for ext in ("*.jpg", "*.jpeg", "*.png"):
+            for img_path in sorted(rgb_dir.glob(ext)):
+                stem = img_path.stem
+                if image_names is not None and stem not in image_names:
+                    continue
+                pose_file = pose_dir / f"{stem}.txt"
+                if not pose_file.exists():
+                    continue
+                c2w = np.loadtxt(str(pose_file), dtype=np.float32)
+                if c2w.size == 16:
+                    c2w = c2w.reshape(4, 4)
+                if c2w.shape != (4, 4):
+                    continue
+                intr_map[stem] = K.copy()
+                c2w_map[stem] = c2w.astype(np.float32)
+                path_map[stem] = str(img_path)
+                with Image.open(img_path) as img:
+                    img_w, img_h = img.size
+                size_map[stem] = (img_w, img_h)
+
+                mask_path = mask_dir / f"{stem}.png"
+                if mask_path.exists():
+                    mask = load_mask(mask_path)
+                    if mask.shape[:2] != (img_h, img_w):
+                        mask_img = Image.fromarray(mask.astype(np.uint8) * 255)
+                        mask_resized = mask_img.resize((img_w, img_h), resample=Image.NEAREST)
+                        mask = (np.array(mask_resized) > 0).astype(bool)
+                    mask_map[stem] = mask
+                else:
+                    mask_map[stem] = np.ones((img_h, img_w), dtype=bool)
+
+        if not intr_map:
+            raise ValueError(f"No valid color/pose pairs in {scene_dir}")
+        logging.info(
+            "加载位姿完成 (ScanNet v2: color + intrinsic + pose)，数量: %d",
+            len(intr_map),
+        )
+        return intr_map, c2w_map, scene_type, size_map, path_map, mask_map
+    # scannet (cam npz + color)
+    else :
         scene_type = "scannet"
         cam_dir = scene_dir / "cam"
         rgb_dir = scene_dir / "color"
@@ -433,8 +502,7 @@ def load_transforms(scene_dir: Path, image_names: Optional[set[str]] = None) -> 
             
         logging.info("加载位姿完成，数量: %d", len(intr_map))
         return intr_map, c2w_map, scene_type, size_map, path_map, mask_map
-    else:
-        raise NotImplementedError(f"不支持的场景格式: {scene_dir}, 目前只支持scannetppv2, dl3dv和scannet.")
+
 
 
 
@@ -1002,6 +1070,7 @@ def process_scene(
     scene: str,
     data_root: Path,
     mask_root: Path,
+    scene_json_dir: Path,
     model_path: Path,
     iteration: int,
     output_dir: Path,
@@ -1019,7 +1088,7 @@ def process_scene(
     scene_dir = data_root / scene
     
     # 尝试加载包含 100 张图的 JSON
-    scene_json_path = Path("Qwen3VL-32B-Scannetppv2_region") / f"{scene}.json"
+    scene_json_path = scene_json_dir / f"{scene}.json"
     image_names = None
     if scene_json_path.exists():
         logging.info("加载场景图片列表: %s", scene_json_path)
@@ -1449,6 +1518,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--scene", default=DEFAULT_SCENE, help="场景名，如 0a5c013435")
     parser.add_argument("--data-root", type=Path, default=DEFAULT_DATA_ROOT, help="scannetppv2/data 根目录")
     parser.add_argument("--mask-root", type=Path, default=DEFAULT_MASK_ROOT, help="sam mask 根目录（含 mask_index.json）")
+    parser.add_argument(
+        "--scene-json-dir",
+        type=Path,
+        default=Path("Qwen3VL-32B-Scannetv2_region"),
+        help="每场景 JSON 所在目录（读取 {scene}.json 中的 per_image 图片列表）",
+    )
     parser.add_argument("--model-path", "-m", type=Path, default=DEFAULT_GS_MODEL, help="3DGS 模型目录（含 cfg_args）")
     parser.add_argument("--iteration", type=int, default=-1, help="加载的迭代编号，-1 表示自动最新")
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR, help="输出 3D bbox 保存目录")
@@ -1532,6 +1607,7 @@ def main() -> None:
         scene=args.scene,
         data_root=args.data_root,
         mask_root=args.mask_root,
+        scene_json_dir=args.scene_json_dir,
         model_path=args.model_path,
         iteration=args.iteration,
         output_dir=args.output_dir,

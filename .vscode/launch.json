@@ -92,6 +92,19 @@
             ]
         },
         {
+            "name": "Debug: train ScanNet scene0000_01 merge",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "PGSR/train.py",
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}",
+            "args": [
+                "-s", "scannetv2/scans/scene0000_01/",
+                "-m", "pgsr_result_scannetv2_merge/scene0000_01",
+                "--resolution", "1"
+            ]
+        },
+        {
             "name": "Debug: 3d_bounding_instance_gs_rerun.py",
             "type": "debugpy",
             "request": "launch",

@@ -166,3 +166,12 @@ train_pgsr_progress_scans_test.json.lock
 poetry.toml
 scannet_pgsr_eval
 truck.jpg
+0bfab69b5b2b692d066b4435f2f6406357772aa53a3e17c3e0b8598083848a7a
+qa_generation.zip
+.gitignore
+3d_bounding_box_pp/3d_bounding_box.tar
+.gitignore
+state/scannetppv2_upload.done
+scripts/
+3d_bounding_box/3d_bounding_box.tar
+HoliSpatial-QA-2M

@@ -176,19 +176,44 @@ def verify_label_with_vlm(
     return False
 
 
-def load_transforms(scene_dir: Path) -> Tuple[Dict[str, np.ndarray], Dict[str, np.ndarray], str, Dict[str, Tuple[int, int]], Dict[str, str]]:
+def load_mask(mask_path: Path) -> np.ndarray:
+    mask = Image.open(mask_path).convert("L")
+    return np.array(mask) > 0
+
+
+def encode_mask(mask: np.ndarray) -> dict:
+    """将 mask 编码为 RLE 格式，与 agent.py 中的保存方式一致"""
+    rle = mask_utils.encode(np.asarray(mask, order="F"))
+    rle["counts"] = rle["counts"].decode("utf-8")
+    return rle
+
+
+def load_transforms(
+    scene_dir: Path, image_names: Optional[set[str]] = None
+) -> Tuple[
+    Dict[str, np.ndarray],
+    Dict[str, np.ndarray],
+    str,
+    Dict[str, Tuple[int, int]],
+    Dict[str, str],
+    Dict[str, np.ndarray],
+]:
     """
-    读取 nerfstudio transforms_undistorted.json，返回
+    读取相机与图像路径，返回
       intr_map[stem] = 3x3 K
       c2w_map[stem] = 4x4 camera-to-world
-      scene_type: str
+      scene_type: str（scannetppv2 / dl3dv / scannet）
       size_map[stem] = (width, height)
-      path_map[stem] = image_path
+      path_map[stem] = image路径
+      mask_map[stem] = image mask (bool)
+
+    支持：ScanNet++ nerfstudio、DL3DV、ScanNet v2（color + intrinsic + pose）、
+    ScanNet 变体（cam npz + color）。
     """
     # scannetppv2
-    if (scene_dir).exists():
+    if (scene_dir / "dslr").exists():
         scene_type = "scannetppv2"
-        json_path = scene_dir /    "dslr/nerfstudio/transforms_undistorted.json"
+        json_path = scene_dir / "dslr/nerfstudio/transforms_undistorted.json"
         with json_path.open("r", encoding="utf-8") as f:
             contents = json.load(f)
 
@@ -201,88 +226,267 @@ def load_transforms(scene_dir: Path) -> Tuple[Dict[str, np.ndarray], Dict[str, n
         c2w_map: Dict[str, np.ndarray] = {}
         size_map: Dict[str, Tuple[int, int]] = {}
         path_map: Dict[str, str] = {}
-        
+        mask_map: Dict[str, np.ndarray] = {}
+
+        mask_dir = scene_dir / "mask"
+
         for frame in [*train_frames, *test_frames]:
+            stem = Path(frame["file_path"]).stem
+            if image_names is not None and stem not in image_names:
+                continue
+
             K = np.array([[fl_x, 0, cx], [0, fl_y, cy], [0, 0, 1]], dtype=np.float32)
             c2w = np.array(frame["transform_matrix"], dtype=np.float32)
             # OpenGL -> COLMAP 约定
             c2w[:3, 1:3] *= -1
-            stem = Path(frame["file_path"]).stem
             intr_map[stem] = K
             c2w_map[stem] = c2w
-            
+
             frame_w = frame.get("w", w)
             frame_h = frame.get("h", h)
             size_map[stem] = (frame_w, frame_h)
-            path_map[stem] = str(scene_dir / "dslr/" / "resized_undistorted_images" /frame["file_path"])
-            
+            path_map[stem] = str(
+                scene_dir / "dslr/" / "resized_undistorted_images" / frame["file_path"]
+            )
+
+            # 加载 mask
+            mask_path = mask_dir / f"{stem}.png"
+            if mask_path.exists():
+                mask = load_mask(mask_path)
+                # 调整 mask 尺寸以匹配图像尺寸
+                if mask.shape[:2] != (frame_h, frame_w):
+                    mask_img = Image.fromarray(mask.astype(np.uint8) * 255)
+                    mask_resized = mask_img.resize((frame_w, frame_h), resample=Image.NEAREST)
+                    mask = (np.array(mask_resized) > 0).astype(bool)
+                mask_map[stem] = mask
+            else:
+                print(f"No mask found for {stem}")
+                # 如果没有 mask，创建一个全为 True 的 mask
+                mask_map[stem] = np.ones((frame_h, frame_w), dtype=bool)
+
         logging.info("加载位姿完成，数量: %d", len(intr_map))
-        return intr_map, c2w_map, scene_type, size_map, path_map
+        return intr_map, c2w_map, scene_type, size_map, path_map, mask_map
     # dl3dv
-    elif (scene_dir/"dense").exists():
+    elif (scene_dir / "dense").exists():
         scene_type = "dl3dv"
         cam_dir = scene_dir / "dense" / "cam"
         rgb_dir = scene_dir / "dense" / "rgb"
-        cam_files = sorted([f for f in os.listdir(cam_dir) if f.endswith('.npz')])
+        cam_files = sorted([f for f in os.listdir(cam_dir) if f.endswith(".npz")])
         intr_map: Dict[str, np.ndarray] = {}
         c2w_map: Dict[str, np.ndarray] = {}
         size_map: Dict[str, Tuple[int, int]] = {}
         path_map: Dict[str, str] = {}
-        
-        for idx, cam_file in tqdm(enumerate(cam_files),total=len(cam_files),):
+        mask_map: Dict[str, np.ndarray] = {}
+
+        mask_dir = scene_dir / "mask"
+
+        for idx, cam_file in tqdm(enumerate(cam_files), total=len(cam_files)):
+            stem = Path(cam_file).stem
+            if image_names is not None and stem not in image_names:
+                continue
+
             cam_file_path = os.path.join(cam_dir, cam_file)
             cam_data = np.load(cam_file_path)
-            if 'intrinsic' in cam_data:
-                intrinsic = cam_data['intrinsic']
+            if "intrinsic" in cam_data:
+                intrinsic = cam_data["intrinsic"]
                 fx = intrinsic[0, 0]
                 fy = intrinsic[1, 1]
                 cx = intrinsic[0, 2]
                 cy = intrinsic[1, 2]
-            elif 'intrinsics' in cam_data:
+            elif "intrinsics" in cam_data:
                 # Fallback for ScanNet-like format
-                intrinsics = cam_data['intrinsics']
+                intrinsics = cam_data["intrinsics"]
                 fx = intrinsics[0, 0]
                 fy = intrinsics[1, 1]
                 cx = intrinsics[0, 2]
                 cy = intrinsics[1, 2]
             else:
-                raise ValueError(f"No intrinsics found in {cam_file}. Available keys: {list(cam_data.keys())}")
-            c2w = cam_data['pose']
+                raise ValueError(
+                    f"No intrinsics found in {cam_file}. Available keys: {list(cam_data.keys())}"
+                )
+            c2w = cam_data["pose"]
             K = np.array([[fx, 0, cx], [0, fy, cy], [0, 0, 1]], dtype=np.float32)
-            stem = Path(cam_file).stem
             intr_map[stem] = K
             c2w_map[stem] = c2w
-            
+
             # DL3DV 通常在 npz 中包含尺寸，或者需要读取图片
             img_path = rgb_dir / f"{stem}.png"
             if not img_path.exists():
                 img_path = rgb_dir / f"{stem}.jpg"
-            
-            if 'width' in cam_data and 'height' in cam_data:
-                size_map[stem] = (int(cam_data['width']), int(cam_data['height']))
+
+            if "width" in cam_data and "height" in cam_data:
+                img_w, img_h = int(cam_data["width"]), int(cam_data["height"])
+                size_map[stem] = (img_w, img_h)
             else:
                 # 如果没有尺寸，尝试读取第一张图获取尺寸
                 with Image.open(img_path) as img:
-                    size_map[stem] = img.size
+                    img_w, img_h = img.size
+                    size_map[stem] = (img_w, img_h)
             path_map[stem] = str(img_path)
-            
+
+            # 加载 mask
+            mask_path = mask_dir / f"{stem}.png"
+            if mask_path.exists():
+                mask = load_mask(mask_path)
+                # 调整 mask 尺寸以匹配图像尺寸
+                if mask.shape[:2] != (img_h, img_w):
+                    mask_img = Image.fromarray(mask.astype(np.uint8) * 255)
+                    mask_resized = mask_img.resize((img_w, img_h), resample=Image.NEAREST)
+                    mask = (np.array(mask_resized) > 0).astype(bool)
+                mask_map[stem] = mask
+            else:
+                # 如果没有 mask，创建一个全为 True 的 mask
+                mask_map[stem] = np.ones((img_h, img_w), dtype=bool)
+
         logging.info("加载位姿完成，数量: %d", len(intr_map))
-        return intr_map, c2w_map, scene_type, size_map, path_map
+        return intr_map, c2w_map, scene_type, size_map, path_map, mask_map
+    # ScanNet v2 官方结构: color/, intrinsic/intrinsic_color.txt, pose/*.txt
+    # 需在 cam+color 分支之前，避免与仅有 cam npz 的变体混淆
+    elif (
+        (scene_dir / "color").exists()
+        and (scene_dir / "intrinsic").exists()
+        and (scene_dir / "pose").exists()
+    ):
+        scene_type = "scannet"
+        rgb_dir = scene_dir / "color"
+        pose_dir = scene_dir / "pose"
+        intrinsic_dir = scene_dir / "intrinsic"
+        intr_file = intrinsic_dir / "intrinsic_color.txt"
+        if not intr_file.exists():
+            intr_file = intrinsic_dir / "intrinsic_depth.txt"
+        if not intr_file.exists():
+            raise FileNotFoundError(f"Intrinsic file not found in {intrinsic_dir}")
+        intr_4x4 = np.loadtxt(str(intr_file), dtype=np.float32)
+        if intr_4x4.size == 16:
+            intr_4x4 = intr_4x4.reshape(4, 4)
+        K = intr_4x4[:3, :3].astype(np.float32)
+
+        intr_map: Dict[str, np.ndarray] = {}
+        c2w_map: Dict[str, np.ndarray] = {}
+        size_map: Dict[str, Tuple[int, int]] = {}
+        path_map: Dict[str, str] = {}
+        mask_map: Dict[str, np.ndarray] = {}
+        mask_dir = scene_dir / "mask"
+
+        for ext in ("*.jpg", "*.jpeg", "*.png"):
+            for img_path in sorted(rgb_dir.glob(ext)):
+                stem = img_path.stem
+                if image_names is not None and stem not in image_names:
+                    continue
+                pose_file = pose_dir / f"{stem}.txt"
+                if not pose_file.exists():
+                    continue
+                c2w = np.loadtxt(str(pose_file), dtype=np.float32)
+                if c2w.size == 16:
+                    c2w = c2w.reshape(4, 4)
+                if c2w.shape != (4, 4):
+                    continue
+                intr_map[stem] = K.copy()
+                c2w_map[stem] = c2w.astype(np.float32)
+                path_map[stem] = str(img_path)
+                with Image.open(img_path) as img:
+                    img_w, img_h = img.size
+                size_map[stem] = (img_w, img_h)
+
+                mask_path = mask_dir / f"{stem}.png"
+                if mask_path.exists():
+                    mask = load_mask(mask_path)
+                    if mask.shape[:2] != (img_h, img_w):
+                        mask_img = Image.fromarray(mask.astype(np.uint8) * 255)
+                        mask_resized = mask_img.resize((img_w, img_h), resample=Image.NEAREST)
+                        mask = (np.array(mask_resized) > 0).astype(bool)
+                    mask_map[stem] = mask
+                else:
+                    mask_map[stem] = np.ones((img_h, img_w), dtype=bool)
+
+        if not intr_map:
+            raise ValueError(f"No valid color/pose pairs in {scene_dir}")
+        logging.info(
+            "加载位姿完成 (ScanNet v2: color + intrinsic + pose)，数量: %d",
+            len(intr_map),
+        )
+        return intr_map, c2w_map, scene_type, size_map, path_map, mask_map
+    # scannet (cam npz + color)
     else:
-        raise NotImplementedError(f"不支持的场景格式: {scene_dir}, 目前只支持scannetppv2和dl3dv.")
+        scene_type = "scannet"
+        cam_dir = scene_dir / "cam"
+        rgb_dir = scene_dir / "color"
+        cam_files = sorted([f for f in os.listdir(cam_dir) if f.endswith(".npz")])
+        intr_map: Dict[str, np.ndarray] = {}
+        c2w_map: Dict[str, np.ndarray] = {}
+        size_map: Dict[str, Tuple[int, int]] = {}
+        path_map: Dict[str, str] = {}
+        mask_map: Dict[str, np.ndarray] = {}
 
+        mask_dir = scene_dir / "mask"
 
+        for idx, cam_file in tqdm(enumerate(cam_files), total=len(cam_files)):
+            stem = Path(cam_file).stem
+            if image_names is not None and stem not in image_names:
+                continue
 
-def load_mask(mask_path: Path) -> np.ndarray:
-    mask = Image.open(mask_path).convert("L")
-    return np.array(mask) > 0
+            cam_file_path = os.path.join(cam_dir, cam_file)
+            cam_data = np.load(cam_file_path)
+            if "intrinsic" in cam_data:
+                intrinsic = cam_data["intrinsic"]
+                fx, fy, cx, cy = intrinsic[0, 0], intrinsic[1, 1], intrinsic[0, 2], intrinsic[1, 2]
+            elif "intrinsics" in cam_data:
+                intrinsics = cam_data["intrinsics"]
+                fx, fy, cx, cy = intrinsics[0, 0], intrinsics[1, 1], intrinsics[0, 2], intrinsics[1, 2]
+            else:
+                raise ValueError(
+                    f"No intrinsics found in {cam_file}. Available keys: {list(cam_data.keys())}"
+                )
 
+            c2w = cam_data["pose"]
+            K = np.array([[fx, 0, cx], [0, fy, cy], [0, 0, 1]], dtype=np.float32)
+            intr_map[stem] = K
+            c2w_map[stem] = c2w
 
-def encode_mask(mask: np.ndarray) -> dict:
-    """将 mask 编码为 RLE 格式，与 agent.py 中的保存方式一致"""
-    rle = mask_utils.encode(np.asarray(mask, order="F"))
-    rle["counts"] = rle["counts"].decode("utf-8")
-    return rle
+            # 查找图片，支持 png, jpg 和 npz
+            img_path = rgb_dir / f"{stem}.png"
+            if not img_path.exists():
+                img_path = rgb_dir / f"{stem}.jpg"
+            if not img_path.exists():
+                img_path = rgb_dir / f"{stem}.npz"
+
+            if "width" in cam_data and "height" in cam_data:
+                img_w, img_h = int(cam_data["width"]), int(cam_data["height"])
+                size_map[stem] = (img_w, img_h)
+            else:
+                if img_path.suffix in [".png", ".jpg"]:
+                    with Image.open(img_path) as img:
+                        img_w, img_h = img.size
+                        size_map[stem] = (img_w, img_h)
+                elif img_path.suffix == ".npz":
+                    img_data = np.load(img_path)
+                    # 尝试常见的 key
+                    if "image" in img_data:
+                        h, w = img_data["image"].shape[:2]
+                    elif "color" in img_data:
+                        h, w = img_data["color"].shape[:2]
+                    else:
+                        raise ValueError(f"No image found in {img_path}")
+                    img_w, img_h = w, h
+                    size_map[stem] = (img_w, img_h)
+            path_map[stem] = str(img_path)
+
+            # 加载 mask
+            mask_path = mask_dir / f"{stem}.png"
+            if mask_path.exists():
+                mask = load_mask(mask_path)
+                # 调整 mask 尺寸以匹配图像尺寸
+                if mask.shape[:2] != (img_h, img_w):
+                    mask_img = Image.fromarray(mask.astype(np.uint8) * 255)
+                    mask_resized = mask_img.resize((img_w, img_h), resample=Image.NEAREST)
+                    mask = (np.array(mask_resized) > 0).astype(bool)
+                mask_map[stem] = mask
+            else:
+                # 如果没有 mask，创建一个全为 True 的 mask
+                mask_map[stem] = np.ones((img_h, img_w), dtype=bool)
+
+        logging.info("加载位姿完成，数量: %d", len(intr_map))
+        return intr_map, c2w_map, scene_type, size_map, path_map, mask_map
 
 
 def resize_mask_to_depth(mask: np.ndarray, depth: np.ndarray) -> np.ndarray:
@@ -837,6 +1041,7 @@ def process_scene(
     scene: str,
     data_root: Path,
     mask_root: Path,
+    scene_json_dir: Path,
     model_path: Path,
     iteration: int,
     output_dir: Path,
@@ -851,21 +1056,24 @@ def process_scene(
     cam_max_size: int,
 ) -> Path:
     scene_dir = data_root / scene
-    intr_map, c2w_map, scene_type, size_map, path_map = load_transforms(scene_dir)
-    print('scene_type:', scene_type)
 
-    # 尝试加载包含 100 张图的 JSON
-    scene_json_path = Path("scene_objects_Qwen3-VL-30B-A3B-Instruct") / f"{scene}.json"
+    # 尝试加载包含 100 张图的 JSON（先于 load_transforms，用于筛选视角）
+    scene_json_path = scene_json_dir / f"{scene}.json"
     image_names = None
     if scene_json_path.exists():
         logging.info("加载场景图片列表: %s", scene_json_path)
         with scene_json_path.open("r", encoding="utf-8") as f:
             scene_data = json.load(f)
             per_image = scene_data.get("per_image", {})
-            image_names = set(per_image.keys())
+            image_names = {Path(name).stem for name in per_image.keys()}
             logging.info("场景包含 %d 张图片", len(image_names))
     else:
         logging.warning("场景图片列表不存在: %s，将渲染所有相机", scene_json_path)
+
+    intr_map, c2w_map, scene_type, size_map, path_map, mask_map = load_transforms(
+        scene_dir, image_names=image_names
+    )
+    print("scene_type:", scene_type)
 
     depth_map, color_map = render_depths_with_gaussians(
         model_path, iteration, 
@@ -948,8 +1156,19 @@ def process_scene(
                 mask = mask_utils.decode(rle).astype(bool)
             else:
                 mask = load_mask(mask_path)
-            
+
             mask = erode_mask(mask, erode_pixels)
+            # 与 image mask 求与，被 mask 的部分不要投射
+            if stem in mask_map:
+                image_mask = mask_map[stem]
+                if image_mask.shape != mask.shape:
+                    mask_img = Image.fromarray(image_mask.astype(np.uint8) * 255)
+                    mask_resized = mask_img.resize(
+                        (mask.shape[1], mask.shape[0]), resample=Image.NEAREST
+                    )
+                    image_mask = (np.array(mask_resized) > 0).astype(bool)
+                mask = mask & image_mask
+
             points = mask_depth_to_points(mask, depth, intr_map[stem], c2w_map[stem])
             points = filter_outliers(points)
             if points.shape[0] < min_points:
@@ -1248,6 +1467,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--scene", default=DEFAULT_SCENE, help="场景名，如 0a5c013435")
     parser.add_argument("--data-root", type=Path, default=DEFAULT_DATA_ROOT, help="scannetppv2/data 根目录")
     parser.add_argument("--mask-root", type=Path, default=DEFAULT_MASK_ROOT, help="sam mask 根目录（含 mask_index.json）")
+    parser.add_argument(
+        "--scene-json-dir",
+        type=Path,
+        default=Path("scene_objects_Qwen3-VL-30B-A3B-Instruct"),
+        help="每场景 JSON 所在目录（读取 {scene}.json 中的 per_image 图片列表）",
+    )
     parser.add_argument("--model-path", "-m", type=Path, default=DEFAULT_GS_MODEL, help="3DGS 模型目录（含 cfg_args）")
     parser.add_argument("--iteration", type=int, default=-1, help="加载的迭代编号，-1 表示自动最新")
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR, help="输出 3D bbox 保存目录")
@@ -1325,6 +1550,7 @@ def main() -> None:
         scene=args.scene,
         data_root=args.data_root,
         mask_root=args.mask_root,
+        scene_json_dir=args.scene_json_dir,
         model_path=args.model_path,
         iteration=args.iteration,
         output_dir=args.output_dir,

@@ -31,7 +31,7 @@ class Scene:
         self.model_path = args.model_path
         self.loaded_iter = None
         self.gaussians = gaussians
-        self.source_path = args.source_path
+        self.source_path = os.path.abspath(args.source_path)
 
         if load_iteration:
             if load_iteration == -1:
@@ -43,20 +43,20 @@ class Scene:
         self.train_cameras = {}
         self.test_cameras = {}
 
-        if os.path.exists(os.path.join(args.source_path, "cam")) and os.path.exists(os.path.join(args.source_path, "color")):  # ScanNet format
+        if os.path.exists(os.path.join(self.source_path, "pose")) and os.path.exists(os.path.join(self.source_path, "color")):  # ScanNet format
             scene_info = sceneLoadTypeCallbacks["scannet"](
-                args.source_path, "color", args.eval, ply_path
+                self.source_path, "color", args.eval, ply_path
             )
-        elif os.path.exists(os.path.join(args.source_path, "dense/rgb")) and os.path.exists(os.path.join(args.source_path, "dense/cam")):  # DL3DV format
+        elif os.path.exists(os.path.join(self.source_path, "dense/rgb")) and os.path.exists(os.path.join(self.source_path, "dense/cam")):  # DL3DV format
             scene_info = sceneLoadTypeCallbacks["DL3DV"](
-                args.source_path, "rgb", args.eval, ply_path
+                self.source_path, "rgb", args.eval, ply_path
             )
         
-        elif os.path.exists(os.path.join(args.source_path, "sparse")):
-            scene_info = sceneLoadTypeCallbacks["Colmap"](args.source_path, args.images, args.eval)
-        elif os.path.exists(os.path.join(args.source_path, "transforms_undistorted.json")):
+        elif os.path.exists(os.path.join(self.source_path, "sparse")):
+            scene_info = sceneLoadTypeCallbacks["Colmap"](self.source_path, args.images, args.eval)
+        elif os.path.exists(os.path.join(self.source_path, "transforms_undistorted.json")):
             print("Found transforms_train.json file, assuming Blender data set!")
-            scene_info = sceneLoadTypeCallbacks["Blender"](args.source_path, args.white_background, args.eval, ply_path, args.images)
+            scene_info = sceneLoadTypeCallbacks["Blender"](self.source_path, args.white_background, args.eval, ply_path, args.images)
         else:
             assert False, "Could not recognize scene type!"
 

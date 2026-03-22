@@ -427,56 +427,136 @@ def readDL3DVCameras(path, images_folder="rgb"):
     
     return cam_infos
 
-def readScannetCameras(path, images_folder="color"):
+def _get_scannet_scene_part_paths(path):
+    scene_path = os.path.abspath(path)
+    scene_name = os.path.basename(os.path.normpath(scene_path))
+    scene_root = os.path.dirname(scene_path)
+
+    if not os.path.isdir(scene_path):
+        raise ValueError(f"ScanNet scene directory not found: {scene_path}")
+
+    if "_" not in scene_name:
+        return [scene_path]
+
+    scene_prefix = scene_name.rsplit("_", 1)[0]
+    part_paths = []
+    for candidate_name in sorted(os.listdir(scene_root)):
+        candidate_path = os.path.join(scene_root, candidate_name)
+        if not os.path.isdir(candidate_path) or "_" not in candidate_name:
+            continue
+
+        candidate_prefix, candidate_suffix = candidate_name.rsplit("_", 1)
+        if candidate_prefix != scene_prefix or not candidate_suffix.isdigit():
+            continue
+
+        if (
+            os.path.exists(os.path.join(candidate_path, "pose"))
+            and os.path.exists(os.path.join(candidate_path, "intrinsic", "intrinsic_color.txt"))
+            and os.path.exists(os.path.join(candidate_path, "color"))
+        ):
+            part_paths.append(candidate_path)
+
+    return part_paths or [scene_path]
+
+def _find_scannet_ply_path(path):
+    pointcloud_da3_path = os.path.join(path, "pointcloud_da3.ply")
+    if os.path.exists(pointcloud_da3_path):
+        return pointcloud_da3_path
+
+    ply_files = [f for f in os.listdir(path) if f.endswith('_vh_clean_2.ply')]
+    if ply_files:
+        return os.path.join(path, ply_files[0])
+
+    ply_files = [f for f in os.listdir(path) if f.endswith('.ply')]
+    if ply_files:
+        return os.path.join(path, ply_files[0])
+
+    return None
+
+def _merge_point_clouds(point_clouds):
+    if not point_clouds:
+        return None
+
+    if len(point_clouds) == 1:
+        return point_clouds[0]
+
+    merged_pcd = BasicPointCloud(
+        points=np.concatenate([pcd.points for pcd in point_clouds], axis=0),
+        colors=np.concatenate([pcd.colors for pcd in point_clouds], axis=0),
+        normals=np.concatenate([pcd.normals for pcd in point_clouds], axis=0),
+    )
+
+    downsample_stride = max(len(point_clouds), 1)
+    if downsample_stride > 1:
+        merged_pcd = BasicPointCloud(
+            points=merged_pcd.points[::downsample_stride],
+            colors=merged_pcd.colors[::downsample_stride],
+            normals=merged_pcd.normals[::downsample_stride],
+        )
+
+    return merged_pcd
+
+def readScannetCameras(path, images_folder="color", image_name_prefix=None, uid_offset=0):
     """
     Read cameras from ScanNet format
     ScanNet structure:
-    - cam/ directory: contains .npz files with intrinsics and pose
+    - intrinsic/intrinsic_color.txt: shared color intrinsics
+    - pose/ directory: contains per-frame camera-to-world matrices
     - color/ directory: contains image files (.jpg)
     """
     cam_infos = []
     
-    cam_dir = os.path.join(path, "cam")
+    pose_dir = os.path.join(path, "pose")
+    intrinsic_path = os.path.join(path, "intrinsic", "intrinsic_color.txt")
     image_dir = os.path.join(path, images_folder)
 
-    if not os.path.exists(cam_dir):
-        raise ValueError(f"ScanNet cam directory not found: {cam_dir}")
+    if not os.path.exists(pose_dir):
+        raise ValueError(f"ScanNet pose directory not found: {pose_dir}")
+    if not os.path.exists(intrinsic_path):
+        raise ValueError(f"ScanNet intrinsic file not found: {intrinsic_path}")
     if not os.path.exists(image_dir):
         raise ValueError(f"ScanNet image directory not found: {image_dir}")
-    
-    # Get list of camera files
-    cam_files = sorted([f for f in os.listdir(cam_dir) if f.endswith('.npz')])
-    
-    for idx, cam_file in tqdm(
-        enumerate(cam_files),
-        total=len(cam_files),
+
+    intrinsics = np.loadtxt(intrinsic_path)
+    fx = intrinsics[0, 0]
+    fy = intrinsics[1, 1]
+    cx = intrinsics[0, 2]
+    cy = intrinsics[1, 2]
+
+    image_files = sorted(
+        [f for f in os.listdir(image_dir) if f.lower().endswith((".jpg", ".png"))],
+        key=lambda name: int(Path(name).stem) if Path(name).stem.isdigit() else Path(name).stem,
+    )
+
+    for idx, image_file_name in tqdm(
+        enumerate(image_files),
+        total=len(image_files),
     ):
-        cam_file_path = os.path.join(cam_dir, cam_file)
-        image_name = cam_file.replace('.npz', '')
-        
-        # Try to find image file
-        image_file = os.path.join(image_dir, f"{image_name}.jpg")
-        if not os.path.exists(image_file):
-            image_file = os.path.join(image_dir, f"{image_name}.png")
-        if not os.path.exists(image_file):
-            print(f"Warning: Image not found for camera {cam_file}, skipping")
+        image_file = os.path.join(image_dir, image_file_name)
+        image_name = Path(image_file_name).stem
+        unique_image_name = image_name
+        if image_name_prefix is not None:
+            unique_image_name = f"{image_name_prefix}_{image_name}"
+
+        pose_path = os.path.join(pose_dir, f"{image_name}.txt")
+        if not os.path.exists(pose_path):
+            print(f"Warning: Pose not found for image {image_file_name}, skipping")
             continue
-        
+
         try:
-            # Load camera parameters from .npz file
-            cam_data = np.load(cam_file_path)
+            # ScanNet stores camera-to-world matrices in pose/<frame_id>.txt
+            c2w = np.loadtxt(pose_path)
+            if c2w.shape != (4, 4):
+                print(f"Warning: Invalid pose shape {c2w.shape} for {pose_path}, skipping")
+                continue
+            if not np.isfinite(c2w).all():
+                print(f"Warning: Non-finite pose values in {pose_path}, skipping")
+                continue
             
-            # Extract intrinsics - ScanNet uses 'intrinsics' (plural)
-            if 'intrinsics' in cam_data:
-                intrinsics = cam_data['intrinsics']
-                fx = intrinsics[0, 0]
-                fy = intrinsics[1, 1]
-                cx = intrinsics[0, 2]
-                cy = intrinsics[1, 2]
-            else:
-                raise ValueError(f"No intrinsics found in {cam_file}. Available keys: {list(cam_data.keys())}")
-            
-            # Load image to get dimensions
+            # Convert to world-to-camera (W2C)
+            w2c = np.linalg.inv(c2w)
+
+            # Load image only after pose passes validation.
             image = Image.open(image_file)
             width, height = image.size
             
@@ -484,27 +564,20 @@ def readScannetCameras(path, images_folder="color"):
             FovX = focal2fov(fx, width)
             FovY = focal2fov(fy, height)
             
-            # Extract extrinsics
-            # 'pose' is the camera-to-world matrix (C2W)
-            c2w = cam_data['pose']
-            
-            # Convert to world-to-camera (W2C)
-            w2c = np.linalg.inv(c2w)
-            
             # Extract R and T
             # R should be transposed for the format expected by Camera class
             R = np.transpose(w2c[:3, :3])
             T = w2c[:3, 3]
             
             cam_info = CameraInfo(
-                uid=idx,
-                global_id=idx,
+                uid=uid_offset + idx,
+                global_id=uid_offset + idx,
                 R=R,
                 T=T,
                 FovY=FovY,
                 FovX=FovX,
                 image_path=image_file,
-                image_name=image_name,
+                image_name=unique_image_name,
                 width=width,
                 height=height,
                 fx=fx,
@@ -518,7 +591,7 @@ def readScannetCameras(path, images_folder="color"):
             cam_infos.append(cam_info)
             
         except Exception as e:
-            print(f"Error loading camera {cam_file}: {e}")
+            print(f"Error loading camera {image_file_name}: {e}")
             import traceback
             traceback.print_exc()
             continue
@@ -565,8 +638,27 @@ def readScannetSceneInfo(path, images="color", eval=False, llffhold=8, ply_path=
     """
     Read scene information from ScanNet format
     """
-    cam_infos_unsorted = readScannetCameras(path, images_folder=images)
+    scene_part_paths = _get_scannet_scene_part_paths(path)
+    print(f"Loading ScanNet scene parts: {[os.path.basename(p) for p in scene_part_paths]}")
+
+    cam_infos_unsorted = []
+    uid_offset = 0
+    for scene_part_path in scene_part_paths:
+        scene_part_name = os.path.basename(os.path.normpath(scene_part_path))
+        part_cam_infos = readScannetCameras(
+            scene_part_path,
+            images_folder=images,
+            image_name_prefix=scene_part_name,
+            uid_offset=uid_offset,
+        )
+        cam_infos_unsorted.extend(part_cam_infos)
+        uid_offset += len(part_cam_infos)
+
     cam_infos = sorted(cam_infos_unsorted.copy(), key=lambda x: x.image_name)
+    cam_infos = [
+        cam_info._replace(uid=idx, global_id=idx)
+        for idx, cam_info in enumerate(cam_infos)
+    ]
     
     if eval:
         train_cam_infos = [c for idx, c in enumerate(cam_infos) if idx % llffhold != 0]
@@ -577,32 +669,34 @@ def readScannetSceneInfo(path, images="color", eval=False, llffhold=8, ply_path=
     
     nerf_normalization = getNerfppNorm(train_cam_infos)
     
-    # For ScanNet, look for PLY file in the scene directory
-    if ply_path is None:
-        # Try to find PLY file with pattern *_vh_clean_2.ply
-        ply_files = [f for f in os.listdir(path) if f.endswith('_vh_clean_2.ply')]
-        if ply_files:
-            ply_path = os.path.join(path, ply_files[0])
-        else:
-            # Fallback: look for any .ply file
-            ply_files = [f for f in os.listdir(path) if f.endswith('.ply')]
-            if ply_files:
-                ply_path = os.path.join(path, ply_files[0])
-    
-    if ply_path and os.path.exists(ply_path):
-        try:
-            pcd = fetchPly(ply_path)
-        except:
-            pcd = None
+    if ply_path is not None:
+        ply_paths = [ply_path]
     else:
-        pcd = None
+        ply_paths = [_find_scannet_ply_path(scene_part_path) for scene_part_path in scene_part_paths]
+
+    valid_ply_paths = []
+    point_clouds = []
+    for cur_ply_path in ply_paths:
+        if not cur_ply_path or not os.path.exists(cur_ply_path):
+            continue
+        try:
+            point_clouds.append(fetchPly(cur_ply_path))
+            valid_ply_paths.append(cur_ply_path)
+        except:
+            continue
+
+    pcd = _merge_point_clouds(point_clouds)
+    if len(valid_ply_paths) > 1:
+        print(
+            f"Merged {len(valid_ply_paths)} ScanNet point clouds and downsampled with stride {len(valid_ply_paths)}."
+        )
     
     scene_info = SceneInfo(
         point_cloud=pcd,
         train_cameras=train_cam_infos,
         test_cameras=test_cam_infos,
         nerf_normalization=nerf_normalization,
-        ply_path=ply_path if ply_path and os.path.exists(ply_path) else None,
+        ply_path=valid_ply_paths[0] if len(valid_ply_paths) == 1 else None,
     )
     return scene_info
 

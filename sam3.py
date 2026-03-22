@@ -192,6 +192,9 @@ def process_scene(
     data_root_str = str(data_root)
     if "scannetppv2" in data_root_str:
         image_root = data_root / scene_name / "dslr" / "resized_undistorted_images"
+    elif "scannetv2" in data_root_str:
+        # ScanNet v2: scans/<scene_id>/color/*.jpg
+        image_root = data_root / scene_name / "color"
     elif "DL3DV" in data_root_str:
         image_root = data_root / scene_name / "dense" / "rgb"
     else:

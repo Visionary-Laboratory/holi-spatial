@@ -1,14 +1,14 @@
 #!/bin/bash
 
 # 单场景示例（保留作参考）
-# python classic_vllm.py --data-root scannetppv2/data --scene 0a5c013435 --api-base http://10.102.204.50:8000/v1 --output-dir Qwen3VL-32B-Scannetppv2
-# python sam3.py --data-root scannetppv2/data --scene-json Qwen3VL-32B-Scannetppv2/0a5c013435.json --output-dir sam3_masks_scannetppv2_new
-# python 3d_bounding_instance_gs_rerun.py --scene 0a5c013435 --data-root scannetppv2/data --mask-root sam3_masks_scannetppv2_new -m pgsr_scannetppv2_all/0a5c013435/ --output-dir output_scannetppv2_new --vllm-api-url http://10.102.206.33:8001/v1/chat/completions
+# python classic_region.py --data-root scannetv2/scans --scene scene0000_00 --api-base http://10.102.204.50:8000/v1 --output-dir Qwen3VL-32B-Scannetv2_region
+# python sam3.py --data-root scannetv2/scans --scene-json Qwen3VL-32B-Scannetv2_region/scene0000_00.json --output-dir sam3_masks_scannetv2_region
+# python 3d_bounding_instance_gs_region.py --scene scene0000_00 --data-root scannetv2/scans --mask-root sam3_masks_scannetv2_region -m pgsr_result_scannetv2/scene0000_00/ --output-dir output_scannetv2_region_new --vllm-api-url http://10.102.206.33:8001/v1/chat/completions
 
 # ========== 批量处理：所有有 point_cloud.ply 的场景，8 卡每卡 2 场景 = 16 并行 ==========
 
-SCENES_DIR="pgsr_scannetppv2_all"
-OUTPUT_JSON_DIR="output_scannetppv2_region_new"
+SCENES_DIR="pgsr_result_scannetv2"
+OUTPUT_JSON_DIR="output_scannetv2_region_new"
 PLY_PATH="point_cloud/iteration_30000/point_cloud.ply"
 SCENES=()
 
@@ -34,15 +34,15 @@ process_scene() {
     local slot=$3
     export CUDA_VISIBLE_DEVICES=$gpu_id
     echo "[GPU${gpu_id}-${slot}] 开始: $scene"
-    python classic_region.py --data-root scannetppv2/data --scene "$scene" --api-base http://10.102.204.50:8000/v1 --output-dir Qwen3VL-32B-Scannetppv2_region || { echo "[GPU${gpu_id}-${slot}] $scene classic_vllm 失败"; return 1; }
-    python sam3.py --data-root scannetppv2/data --scene-json "Qwen3VL-32B-Scannetppv2_region/${scene}.json" --output-dir sam3_masks_scannetppv2_region || { echo "[GPU${gpu_id}-${slot}] $scene sam3 失败"; return 1; }
-    python 3d_bounding_instance_gs_region.py --scene "$scene" --data-root scannetppv2/data --mask-root sam3_masks_scannetppv2_region -m "pgsr_scannetppv2_all/${scene}/" --output-dir output_scannetppv2_region_new --vllm-api-url http://10.102.206.33:8001/v1/chat/completions || { echo "[GPU${gpu_id}-${slot}] $scene 3d_bounding 失败"; return 1; }
+    python classic_region.py --data-root scannetv2/scans --scene "$scene" --api-base http://10.102.204.50:8000/v1 --output-dir Qwen3VL-32B-Scannetv2_region || { echo "[GPU${gpu_id}-${slot}] $scene classic_region 失败"; return 1; }
+    python sam3.py --data-root scannetv2/scans --scene-json "Qwen3VL-32B-Scannetv2_region/${scene}.json" --output-dir sam3_masks_scannetv2_region || { echo "[GPU${gpu_id}-${slot}] $scene sam3 失败"; return 1; }
+    python 3d_bounding_instance_gs_region.py --scene "$scene" --data-root scannetv2/scans --mask-root sam3_masks_scannetv2_region -m "${SCENES_DIR}/${scene}/" --output-dir output_scannetv2_region_new --vllm-api-url http://10.102.206.30:8000/v1/chat/completions || { echo "[GPU${gpu_id}-${slot}] $scene 3d_bounding 失败"; return 1; }
     echo "[GPU${gpu_id}-${slot}] 完成: $scene"
 }
 
 # 16 并行，每卡 2 个场景：用全局任务序号 task_index 分配 GPU，保证轮询 0~7
-MAX_PARALLEL=16
-NUM_GPUS=8
+MAX_PARALLEL=12
+NUM_GPUS=2
 pids=()
 task_index=0
 

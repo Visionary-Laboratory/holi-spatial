@@ -78,6 +78,16 @@ def gen_virtul_cam(cam, trans_noise=1.0, deg_noise=15.0):
                         preload_img=False, data_device = "cuda")
     return virtul_cam
 
+def crop_supervision_border(tensor, border=12):
+    if tensor is None or border <= 0 or tensor.dim() < 2:
+        return tensor
+
+    height, width = tensor.shape[-2], tensor.shape[-1]
+    if height <= 2 * border or width <= 2 * border:
+        return tensor
+
+    return tensor[..., border:-border, border:-border]
+
 def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from, ply_path):
     first_iter = 0
     tb_writer = prepare_output_and_logger(dataset)
@@ -166,12 +176,14 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             render_pkg["render"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
         
         # Loss
-        ssim_loss = (1.0 - ssim(image, gt_image))
+        image_supervision = crop_supervision_border(image, border=12)
+        gt_image_supervision = crop_supervision_border(gt_image, border=12)
+        ssim_loss = (1.0 - ssim(image_supervision, gt_image_supervision))
         if 'app_image' in render_pkg and ssim_loss < 0.5:
-            app_image = render_pkg['app_image']
-            Ll1 = l1_loss(app_image, gt_image)
+            app_image = crop_supervision_border(render_pkg['app_image'], border=12)
+            Ll1 = l1_loss(app_image, gt_image_supervision)
         else:
-            Ll1 = l1_loss(image, gt_image)
+            Ll1 = l1_loss(image_supervision, gt_image_supervision)
         image_loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * ssim_loss
         loss = image_loss.clone()
         
@@ -200,8 +212,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         Ll1depth_pure = 0.0
         if viewpoint_cam.depth_map is not None:
             if depth_l1_weight(iteration) > 0:
-                Depth = render_pkg['plane_depth']
-                mono_invdepth = viewpoint_cam.depth_map.cuda()
+                Depth = crop_supervision_border(render_pkg['plane_depth'], border=12)
+                mono_invdepth = crop_supervision_border(viewpoint_cam.depth_map.cuda(), border=12)
                 # depth_mask = viewpoint_cam.depth_mask.cuda()
 
                 Ll1depth_pure = torch.abs((Depth  - mono_invdepth) ).mean()
