@@ -7,7 +7,7 @@
 <p align="center">
   <a href="https://arxiv.org/abs/2603.07660"><img src="https://img.shields.io/badge/arXiv-2603.07660-b31b1b.svg" alt="arXiv"></a>
   <a href="https://visionary-laboratory.github.io/holi-spatial/"><img src="https://img.shields.io/badge/Website-Project-blue" alt="Website"></a>
-  <a href="https://github.com/Visionary-Laboratory/holi-spatial"><img src="https://img.shields.io/badge/Dataset-Holi--Spatial-green" alt="Dataset"></a>
+  <a href="https://huggingface.co/Holi-Spatial"><img src="https://img.shields.io/badge/Dataset-Holi--Spatial-green" alt="Dataset"></a>
   <a href="https://github.com/Visionary-Laboratory/holi-spatial"><img src="https://img.shields.io/badge/Model-Holi--Spatial-orange" alt="Model"></a>
   <a href="https://huggingface.co/papers/2603.07660"><img src="https://img.shields.io/badge/HuggingFace-Paper-yellow" alt="HuggingFace Paper"></a>
 </p>
@@ -16,8 +16,7 @@
 
 
 - [x] We release the project page of Holi-Spatial, check on [here](https://visionary-laboratory.github.io/holi-spatial/).
-- [ ] We release the Holi-Spatial project code! Check out the repository for more details.
-- [ ] We release the subset of Holi-Spatial dataset.
+- [x] We have released a subset of the [Holi-Spatial dataset](https://huggingface.co/Holi-Spatial), featuring **2,000+ high-quality Gaussian models**, each accompanied by its corresponding **mesh** and **scene-level 3D bounding box annotations**, together with **HoliSpatial-QA-2M**, a **2-million-scale QA dataset** built upon part of these richly annotated 3D assets.
 - [ ] We release all model checkpoints.
 
-📢 All code, datasets, and model checkpoints will be fully released before April 1.
+📢 All datasets, and model checkpoints will be fully released before April 1.
