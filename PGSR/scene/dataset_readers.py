@@ -293,7 +293,7 @@ def readNerfSyntheticInfo(path, white_background, eval, ply_path=None, images=No
 
     if ply_path == None:
         print("ply_path is None, make sure this is eval")
-        ply_path = "DptV3/data/0a5c013435/pointcloud_da3.ply"
+        ply_path = "output_scannet/scannetppv2/0b031f3119/input.ply"
 
     # ply_path = os.path.join(path, "points3d.ply")
     if not os.path.exists(ply_path):
@@ -598,6 +598,110 @@ def readScannetCameras(path, images_folder="color", image_name_prefix=None, uid_
     
     return cam_infos
 
+
+def _load_matrix_4x4_txt(file_path: str) -> np.ndarray:
+    mat = np.loadtxt(file_path, dtype=np.float32)
+    if mat.shape == (4, 4):
+        return mat
+    if mat.size == 16:
+        return mat.reshape(4, 4)
+    raise ValueError(f"矩阵文件不是 4x4: {file_path}, shape={mat.shape}")
+
+
+def _scannetv2_sort_key(cam: CameraInfo):
+    try:
+        return (0, int(cam.image_name))
+    except Exception:
+        return (1, cam.image_name)
+
+
+def _scannetv2_name_sort_key(name: str):
+    stem = Path(name).stem
+    try:
+        return (0, int(stem))
+    except Exception:
+        return (1, stem)
+
+
+def readScannetV2Cameras(path, images_folder="color"):
+    """
+    Read cameras from ScanNetV2 format.
+    ScanNetV2 structure:
+    - color/ directory: image files
+    - pose/ directory: c2w txt files (4x4)
+    - intrinsic/intrinsic_color.txt: camera intrinsic matrix
+    """
+    cam_infos = []
+
+    pose_dir = os.path.join(path, "pose")
+    image_dir = os.path.join(path, images_folder)
+    intrinsic_dir = os.path.join(path, "intrinsic")
+    intrinsic_file = os.path.join(intrinsic_dir, "intrinsic_color.txt")
+
+    if not os.path.exists(pose_dir):
+        raise ValueError(f"ScanNetV2 pose directory not found: {pose_dir}")
+    if not os.path.exists(image_dir):
+        raise ValueError(f"ScanNetV2 image directory not found: {image_dir}")
+    if not os.path.exists(intrinsic_file):
+        raise ValueError(f"ScanNetV2 intrinsic file not found: {intrinsic_file}")
+
+    K = _load_matrix_4x4_txt(intrinsic_file)
+    fx = float(K[0, 0])
+    fy = float(K[1, 1])
+
+    pose_files = sorted([f for f in os.listdir(pose_dir) if f.endswith(".txt")], key=_scannetv2_name_sort_key)
+    for idx, pose_file in tqdm(
+        enumerate(pose_files),
+        total=len(pose_files),
+    ):
+        frame_stem = Path(pose_file).stem
+        pose_file_path = os.path.join(pose_dir, pose_file)
+
+        image_file = None
+        for ext in [".jpg", ".png", ".jpeg", ".JPG", ".PNG", ".JPEG"]:
+            cand = os.path.join(image_dir, f"{frame_stem}{ext}")
+            if os.path.exists(cand):
+                image_file = cand
+                break
+        if image_file is None:
+            continue
+
+        try:
+            c2w = _load_matrix_4x4_txt(pose_file_path)
+            if not np.isfinite(c2w).all():
+                continue
+            w2c = np.linalg.inv(c2w)
+            R = np.transpose(w2c[:3, :3])
+            T = w2c[:3, 3]
+
+            image = Image.open(image_file)
+            width, height = image.size
+            image.close()
+
+            FovX = focal2fov(fx, width)
+            FovY = focal2fov(fy, height)
+
+            cam_info = CameraInfo(
+                uid=idx,
+                global_id=idx,
+                R=R,
+                T=T,
+                FovY=FovY,
+                FovX=FovX,
+                image_path=image_file,
+                image_name=frame_stem,
+                width=width,
+                height=height,
+                fx=fx,
+                fy=fy,
+            )
+            cam_infos.append(cam_info)
+        except Exception as e:
+            print(f"Error loading ScanNetV2 frame {pose_file}: {e}")
+            continue
+
+    return cam_infos
+
 def readDL3DVSceneInfo(path, images="rgb", eval=False, llffhold=8, ply_path="pointcloud_da3.ply"):
     """
     Read scene information from DL3DV format
@@ -700,9 +804,49 @@ def readScannetSceneInfo(path, images="color", eval=False, llffhold=8, ply_path=
     )
     return scene_info
 
+
+def readScannetV2SceneInfo(path, images="color", eval=False, llffhold=8, ply_path="pointcloud_da3.ply"):
+    """
+    Read scene information from ScanNetV2 format.
+    """
+    cam_infos_unsorted = readScannetV2Cameras(path, images_folder=images)
+    cam_infos = sorted(cam_infos_unsorted.copy(), key=_scannetv2_sort_key)
+
+    if eval:
+        train_cam_infos = [c for idx, c in enumerate(cam_infos) if idx % llffhold != 0]
+        test_cam_infos = [c for idx, c in enumerate(cam_infos) if idx % llffhold == 0]
+    else:
+        train_cam_infos = cam_infos
+        test_cam_infos = []
+
+    nerf_normalization = getNerfppNorm(train_cam_infos)
+
+    if ply_path is None:
+        ply_path = os.path.join(path, "pointcloud_da3.ply")
+    elif not os.path.isabs(ply_path):
+        ply_path = os.path.join(path, ply_path)
+
+    if ply_path and os.path.exists(ply_path):
+        try:
+            pcd = fetchPly(ply_path)
+        except Exception:
+            pcd = None
+    else:
+        pcd = None
+
+    scene_info = SceneInfo(
+        point_cloud=pcd,
+        train_cameras=train_cam_infos,
+        test_cameras=test_cam_infos,
+        nerf_normalization=nerf_normalization,
+        ply_path=ply_path if ply_path and os.path.exists(ply_path) else None,
+    )
+    return scene_info
+
 sceneLoadTypeCallbacks = {
     "Colmap": readColmapSceneInfo,
     "Blender" : readNerfSyntheticInfo,
     "DL3DV": readDL3DVSceneInfo,
     "scannet": readScannetSceneInfo,
+    "scannetv2": readScannetV2SceneInfo,
 }

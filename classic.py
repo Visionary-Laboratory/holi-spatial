@@ -16,7 +16,7 @@ from sam3.agent.client_sam3 import call_sam_service as call_sam_service_orig
 # DEFAULT_MODEL_PATH = "/mnt/shared-storage-user/solution/huggingface/hub/models--Qwen--Qwen2.5-VL-7B-Instruct/snapshots/cc594898137f460bfe9f0759e9844b3ce807cfb5/"
 DEFAULT_MODEL_PATH = "/mnt/shared-storage-user/intern7shared/share_ckpt_hf/models--Qwen--Qwen3-VL-30B-A3B-Instruct/snapshots/4b184fbdab8886057d8d80c09f35bcfc65fe640e"
 DEFAULT_DATA_ROOT = "scannetppv2"
-DEFAULT_OUTPUT_DIR = "scene_objects_Qwen3-VL-30B-A3B-Instruct"
+DEFAULT_OUTPUT_DIR = "scene_objects_Qwen3-VL-30B-A3B-Instruct-DL3DV"
 
 
 def setup_logger() -> None:

@@ -113,7 +113,7 @@ bbox_overlay_scannet_batch_outputs_aabb/
 bbox_overlay_test_outputs_aabb_gyy/
 new_json_scannet/
 pgsr_result_scannetv2/
-qa_generation/
+# qa_generation/
 Qwen3VL-32B-Scannetv2/
 sam3_masks_DL3DV/
 website/

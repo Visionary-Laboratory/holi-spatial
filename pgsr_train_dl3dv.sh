@@ -11,7 +11,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCENE_ROOT="${SCENE_ROOT:-$ROOT_DIR/DL3DV/2K}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-$ROOT_DIR/output_DL3DV/2K/}"
-LOG_FILE="${LOG_FILE:-$ROOT_DIR/train_pgsr_progress_dl3dv.json}"
+LOG_FILE="${LOG_FILE:-$ROOT_DIR/train_pgsr_progress_dl3dv_2k.json}"
 SLEEP_INTERVAL=5   # 轮询作业完成的间隔（秒）
 MAX_JOBS_PER_GPU=3
 DONE_PLY_REL="point_cloud/iteration_30000/point_cloud.ply"

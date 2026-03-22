@@ -9,11 +9,11 @@ set -euo pipefail
 
 
 
+DATA_ROOT="DL3DV/2K"
 
-
-DATA_ROOT="/home/liuyifei/code/posevlm/scannetppv2/data"
-OUTPUT_ROOT="/home/liuyifei/code/posevlm/output"
-PROCESSED_ROOT="/home/liuyifei/code/posevlm/output_3d_bounding"
+# DATA_ROOT="/home/liuyifei/code/posevlm/scannetppv2/data"
+OUTPUT_ROOT="output_DL3DV/2K"
+PROCESSED_ROOT="/home/liuyifei/code/posevlm/output_3d_bounding_DL3DV"
 
 
 #run PGSR
@@ -56,7 +56,7 @@ if [ ${#SCENES[@]} -eq 0 ]; then
 fi
 
 # 初始化状态记录文件
-STATUS_JSON="3d_bounding_scannet.json"
+STATUS_JSON="3d_bounding_scannet_dl3dv.json"
 export ALL_SCENES_STR="${SCENES[*]}"
 python - <<PY
 import json
@@ -160,13 +160,13 @@ process_scene() {
         success=false
     fi
 
-    python sam3.py --scene-json "scene_objects_Qwen3-VL-30B-A3B-Instruct/${scene}.json"
+    python sam3.py --scene-json "scene_objects_Qwen3-VL-30B-A3B-Instruct-DL3DV/${scene}.json" --data-root "${DATA_ROOT}"
     if [ $? -ne 0 ]; then
         echo "❌ Error: sam3.py failed for scene ${scene} on GPU ${gpu_id}"
         success=false
     fi
 
-    python 3d_bounding_instance_gs_rerun.py --scene "${scene}" -m "${OUTPUT_ROOT}/${scene}"
+    python 3d_bounding_instance_gs_rerun.py --scene "${scene}" -m "${OUTPUT_ROOT}/${scene}" --data-root "${DATA_ROOT}"
     if [ $? -ne 0 ]; then
         echo "❌ Error: 3d_bounding_instance_gs_rerun.py failed for scene ${scene} on GPU ${gpu_id}"
         success=false
@@ -202,3 +202,8 @@ done
 # 等待所有剩余任务完成
 wait
 echo "所有任务已完成。"
+
+
+
+
+ python 2d_iou_gyn_seperate_instance_scene_label_gyy.py --scene scene0204_02 --rrd-path 3d_bounding_scannet_evalation_ours/scene0204_02.rrd --gt-json mask_index_outputs_scannet/scene0204_02.json --output-dir 2d_iou_scannet --model-path scannet_pgsr_eval/scene0204_02/

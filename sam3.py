@@ -17,8 +17,8 @@ from sam3.model.sam3_image_processor import Sam3Processor
 
 
 DEFAULT_DATA_ROOT = Path("/home/liuyifei/code/posevlm/scannetppv2/data")
-DEFAULT_SCENE_JSON = Path("scene_objects_Qwen3-VL-30B-A3B-Instruct/0a5c013435.json")
-DEFAULT_OUTPUT_DIR = Path("/home/liuyifei/code/posevlm/sam_masks_debug")
+DEFAULT_SCENE_JSON = Path("scene_objects_Qwen3-VL-30B-A3B-Instruct-DL3DV/0a5c013435.json")
+DEFAULT_OUTPUT_DIR = Path("/home/liuyifei/code/posevlm/sam_masks_debug_dl3dv")
 
 
 def setup_logger() -> None:
@@ -189,8 +189,10 @@ def process_scene(
 ) -> Path:
     scene_name, per_image = load_scene_json(scene_json)
 
-    data_root_str = str(data_root)
-    if "scannetppv2" in data_root_str:
+    data_root_str = str(data_root).lower()
+    if "scannetv2" in data_root_str:
+        image_root = data_root / scene_name / "color"
+    elif "scannetppv2" in data_root_str:
         image_root = data_root / scene_name / "dslr" / "resized_undistorted_images"
     elif "scannetv2" in data_root_str:
         # ScanNet v2: scans/<scene_id>/color/*.jpg

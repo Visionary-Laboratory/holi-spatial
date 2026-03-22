@@ -5,15 +5,73 @@
     "version": "0.2.0",
     "configurations": [
     
-        
-
+    
         {
             "name": "Python 调试当前文件",
             "type": "debugpy",
             "request": "launch",
             "program": "${file}",
             "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}",
             "env": {"CUDA_VISIBLE_DEVICES": "0"},
+        },
+        {
+            "name": "LLaMA-Factory Full SFT (InternVL3)",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/.venv/bin/llamafactory-cli",
+            "args": [
+              "train",
+              "examples/train_full/internvl3_full_sft_sensenova.yaml"
+            ],
+            "env": {
+              "FORCE_TORCHRUN": "1",
+              "DISABLE_VERSION_CHECK": "1"
+            },
+            "cwd": "${workspaceFolder}/train_vlm/LLaMA-Factory",
+            "console": "integratedTerminal",
+            "justMyCode": false
+        },
+        {
+            "name": "Python 调试程序: convert_qa_to_llamafactory.py",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "qa_generation/convert_qa_to_llamafactory.py",
+            "console": "integratedTerminal",
+            "env": {"CUDA_VISIBLE_DEVICES": "0"},
+            "args": [
+                "--image-root", "/home/liuyifei/code/posevlm/scannetppv2",
+                "--qa-json-dir", "output_QA_lang_filter_repeat",
+                "--output-dir", "output_llamafactory_dataset_lang"
+            ]
+
+        },
+        {
+            "name": "Python 调试程序: generate_3d_instance_description.py",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "qa_generation/generate_3d_instance_description.py",
+            "console": "integratedTerminal",
+            "env": {"CUDA_VISIBLE_DEVICES": "0"},
+            "args": [
+                "--input_dir", "output_3d_bounding",
+                "--output_dir", "output_3d_instance_description",
+                "--scene_id_list", "[\"0a5c013435\"]"
+            ]
+
+        },
+        {
+            "name": "Python 调试程序: generate_two_view_qa.py",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "qa_generation/generate_two_view_qa.py",
+            "console": "integratedTerminal",
+            "env": {"CUDA_VISIBLE_DEVICES": "0"},
+            "args": [
+                "--scene-id-list", "[\"0a5c013435\"]"
+                // "--scene-id-list", "[\"0a7cc12c0e\"]"
+            ]
+
         },
         {
             "name": "Python 调试程序: classic.py",
@@ -113,14 +171,107 @@
             "cwd": "${workspaceFolder}",
             "env": {"CUDA_VISIBLE_DEVICES": "0"},
             "args": [
-                // "--data-root", "DL3DV/1K/",
                 "--scene", "00a231a370",
                 "-m", "output/00a231a370"
-                // "--mask-root", "sam_dl3dv/",
-                // "--model-path", "output_DL3DV/1K/0a6c01ac3212768772f8f6eca86314c72d5ca320c3e3def148ddaceab23c07f4",
-                // "--erode-pixels", "20",
-                // "--output-dir", "output_yifei_dl3dv"
-
+            ]
+        },
+        {
+            "name": "Python: 2d_iou_Sa2VA.py",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/2d_iou_Sa2VA.py",
+            "console": "integratedTerminal",
+            "justMyCode": true,
+            "cwd": "${workspaceFolder}",
+            "env": {"CUDA_VISIBLE_DEVICES": "0"},
+            "args": [
+                "--scene",
+                "0a7cc12c0e",
+                "--data-root",
+                "scannetppv2/data",
+                "--gt-json",
+                "mask_index_outputs/0a7cc12c0e.json",
+                "--scene-objects-json",
+                "scene_objects_Qwen3-VL-30B-A3B-Instruct/0a7cc12c0e.json",
+                "--output-dir",
+                "2d_iou_sa2va_outputs",
+                "--model-path",
+                "/mnt/shared-storage-user/solution/huggingface/hub/models--ByteDance--Sa2VA-Qwen2_5-VL-7B/snapshots/4cd6709067cf257235e922c201a6f265292f5fc8"
+            ]
+        },
+        {
+            "name": "Debug: PGSR train ScanNet (scene0707_00)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/PGSR/train.py",
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}",
+            "env": {"CUDA_VISIBLE_DEVICES": "0"},
+            "args": [
+                "-s",
+                "scannet/scans_test/scene0707_00",
+                "-m",
+                "output_scans_test/scene0707_00",
+                "--resolution",
+                "1"
+            ]
+        },
+        {
+            "name": "Debug: 2d_iou_gyn_seperate_instance_scene_label_gyy.py (1cefb55d50)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/2d_iou_gyn_seperate_instance_scene_label_gyy.py",
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}",
+            "args": [
+                "--scene",
+                "1cefb55d50",
+                "--rrd-path",
+                "output_3d_bounding_scannet_evaluation_kuixuan/1cefb55d50.rrd",
+                "--mask-selection",
+                "merge",
+                "--output-dir",
+                "gyn_test_images/2d_iou_outputs_gyn_new_kuixuan_new_1652_Ours"
+            ]
+        },
+        {
+            "name": "Python 调试程序: convert_qa_to_llamafactory.py",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "qa_generation/convert_qa_to_llamafactory.py",
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}",
+            "env": {"CUDA_VISIBLE_DEVICES": "0"},
+            "args": [
+                "--image-root",
+                "/home/liuyifei/code/posevlm/scannetppv2",
+                "--qa-json-dir",
+                "output_QA",
+                "--output-dir",
+                "output_llamafactory_dataset",
+                "--scene-id",
+                "0a7cc12c0e"
+            ]
+        },
+        {
+            "name": "Debug: 2d_iou_gyn_seperate_instance_scene_label_gyy.py (scene0520_00)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/2d_iou_gyn_seperate_instance_scene_label_gyy.py",
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}",
+            "env": {"CUDA_VISIBLE_DEVICES": "0"},
+            "args": [
+                "--scene",
+                "scene0124_00",
+                "--rrd-path",
+                "3d_bounding_scannet_evalation_ours/scene0124_00.rrd",
+                "--gt-json",
+                "mask_index_outputs_scannet/scene0124_00.json",
+                "--output-dir",
+                "2d_iou_scannet",
+                "--model-path",
+                "scannet_pgsr_eval/scene0124_00/"
             ]
         }
     ]

@@ -18,9 +18,10 @@ from tqdm import tqdm
 import trimesh
 from scipy.spatial.transform import Rotation as R
 import pycocotools.mask as mask_utils
-from transformers import AutoModelForVision2Seq, AutoProcessor
+# transformers 导入已移除，改用 vLLM 服务
 import base64
 import io
+import requests
 
 from sam3.agent.helpers.visualizer import Visualizer
 from sam3.agent.helpers.zoom_in import render_zoom_in
@@ -35,14 +36,15 @@ from scene import Scene  # noqa: E402
 from scene.gaussian_model import GaussianModel  # noqa: E402
 
 
-DEFAULT_SCENE = "0a5c013435"
-DEFAULT_DATA_ROOT = Path("scannetppv2/data")
-DEFAULT_MASK_ROOT = Path("sam_masks_debug")
-DEFAULT_OUTPUT_DIR = Path("output_3d_bounding")
-DEFAULT_GS_MODEL = Path("output") / DEFAULT_SCENE
-DEFAULT_RERUN = False
+DEFAULT_SCENE = "scene0000_00"
+DEFAULT_DATA_ROOT = Path("processed_scannet/scans")
+DEFAULT_MASK_ROOT = Path("sam_masks_debug/sam_masks_debug")
+DEFAULT_OUTPUT_DIR = Path("output_3d_bounding/output_3d_bounding_mask_z")
+DEFAULT_GS_MODEL = Path("pgsr_scannet") / DEFAULT_SCENE
+DEFAULT_RERUN = True
 MAX_POINT_COUNT = 5_000_000
-DEFAULT_VLM_MODEL_PATH = "/mnt/shared-storage-user/intern7shared/share_ckpt_hf/models--Qwen--Qwen3-VL-30B-A3B-Thinking/snapshots/7e9bbfa2c1b2059edd18160793fd421194da2c10/"
+DEFAULT_VLM_MODEL_PATH = "/mnt/shared-storage-user/solution/huggingface/hub/models--Qwen--Qwen3-VL-30B-A3B-Thinking/snapshots/d0ed0380729be07a546fdefafbb4fe411f341e92/"
+DEFAULT_VLLM_API_URL = "http://127.0.0.1:8000/v1/chat/completions"
 
 
 def label_color(label: str) -> np.ndarray:
@@ -68,27 +70,48 @@ def setup_logger(log_path: Optional[Path] = None) -> None:
     )
 
 
-def load_vlm_model(model_path: str):
-    logging.info("加载 VLM 模型: %s", model_path)
-    model = AutoModelForVision2Seq.from_pretrained(
-        model_path,
-        torch_dtype=torch.bfloat16,
-        attn_implementation="flash_attention_2",
-        device_map="auto",
-    )
-    processor = AutoProcessor.from_pretrained(model_path)
-    return model, processor
+def load_vlm_model(api_url: str = DEFAULT_VLLM_API_URL):
+    """初始化 vLLM 服务客户端。
+    
+    Args:
+        api_url: vLLM 服务的 API 地址，默认为 DEFAULT_VLLM_API_URL
+    
+    Returns:
+        api_url: 返回 API URL 字符串（保持接口兼容性）
+    """
+    logging.info("使用 vLLM 服务: %s", api_url)
+    # 测试连接（可选，不阻塞）
+    try:
+        health_url = api_url.replace("/v1/chat/completions", "/health")
+        response = requests.get(health_url, timeout=5)
+        if response.status_code == 200:
+            logging.info("vLLM 服务健康检查通过")
+        else:
+            logging.warning("vLLM 服务健康检查返回状态码: %d", response.status_code)
+    except requests.exceptions.RequestException:
+        # 健康检查失败不影响后续使用，实际调用时会再次尝试
+        logging.info("vLLM 服务健康检查跳过（服务可能未启动或地址不同）")
+    except Exception as e:
+        logging.debug("vLLM 健康检查异常: %s", e)
+    return api_url
+
+
+def image_to_base64(image: Image.Image) -> str:
+    """将 PIL Image 转换为 base64 编码的字符串。"""
+    buffered = io.BytesIO()
+    image.convert("RGB").save(buffered, format="JPEG")
+    img_str = base64.b64encode(buffered.getvalue()).decode("utf-8")
+    return img_str
 
 
 def verify_label_with_vlm(
-    model,
-    processor,
+    api_url: str,
     raw_image: Image.Image,
     overlay_image: Image.Image,
     zoomed_image: Image.Image,
     category: str,
 ) -> bool:
-    """使用本地 Qwen 模型验证标签是否正确。"""
+    """使用 vLLM 服务验证标签是否正确。"""
     prompt = (
         "You are a visual label verifier for a single masked object.\n"
         "You will be given three images: (1) the original image, (2) an overlay image where the target object is highlighted with a colored mask, and (3) a zoomed-in pair showing the original object and the highlighted object.\n"
@@ -118,40 +141,54 @@ def verify_label_with_vlm(
         "Do not output any extra text after the JSON object. The JSON should be the final part of your response."
     )
 
-    messages = [
-        {
-            "role": "user",
-            "content": [
-                {"type": "image", "image": raw_image.convert("RGB")},
-                {"type": "image", "image": overlay_image.convert("RGB")},
-                {"type": "image", "image": zoomed_image.convert("RGB")},
-                {"type": "text", "text": prompt},
-            ],
-        }
-    ]
-
     try:
-        # 准备模型输入
-        inputs = processor.apply_chat_template(
-            messages,
-            tokenize=True,
-            add_generation_prompt=True,
-            return_dict=True,
-            return_tensors="pt",
-        )
-        inputs = inputs.to(model.device)
+        # 将图像转换为 base64
+        raw_img_b64 = image_to_base64(raw_image)
+        overlay_img_b64 = image_to_base64(overlay_image)
+        zoomed_img_b64 = image_to_base64(zoomed_image)
 
-        with torch.inference_mode():
-            # 再次增加 tokens 限制，某些复杂场景 Thinking 需要极长的篇幅
-            generated_ids = model.generate(**inputs, max_new_tokens=2048)
-
-        # 提取生成的文本
-        trimmed = [
-            out_ids[len(in_ids) :] for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
+        # 构建符合 OpenAI 格式的消息（vLLM 兼容）
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"data:image/jpeg;base64,{raw_img_b64}"}
+                    },
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"data:image/jpeg;base64,{overlay_img_b64}"}
+                    },
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"data:image/jpeg;base64,{zoomed_img_b64}"}
+                    },
+                    {
+                        "type": "text",
+                        "text": prompt
+                    }
+                ]
+            }
         ]
-        output_text = processor.batch_decode(
-            trimmed, skip_special_tokens=True, clean_up_tokenization_spaces=False
-        )[0]
+
+        # 发送请求到 vLLM 服务
+        payload = {
+            "model": "",  # vLLM 不需要指定模型名称，会自动使用已加载的模型
+            "messages": messages,
+            "max_tokens": 2048,
+            "temperature": 0.0,  # 使用确定性输出
+        }
+
+        response = requests.post(api_url, json=payload, timeout=120)
+        response.raise_for_status()
+
+        result = response.json()
+        if "choices" not in result or len(result["choices"]) == 0:
+            logging.warning("vLLM 返回结果格式异常: %s", result)
+            return False
+        
+        output_text = result["choices"][0]["message"]["content"]
 
         # 尝试从输出中提取 JSON
         import json
@@ -164,14 +201,18 @@ def verify_label_with_vlm(
             try:
                 data = json.loads(json_str)
                 decision = data.get("decision", "REJECT")
-                logging.info("Qwen 验证结果 [%s]: %s -> %s", category, decision, data.get("predicted_label", ""))
+                logging.info("vLLM 验证结果 [%s]: %s -> %s", category, decision, data.get("predicted_label", ""))
                 return decision == "ACCEPT"
             except json.JSONDecodeError:
-                logging.warning("Qwen 返回了无效的 JSON 字符串: %s", json_str)
+                logging.warning("vLLM 返回了无效的 JSON 字符串: %s", json_str)
         else:
-            logging.warning("Qwen 未能输出 JSON 格式结果，输出预览: %s...", output_text[:200])
+            logging.warning("vLLM 未能输出 JSON 格式结果，输出预览: %s...", output_text[:200])
+    except requests.exceptions.RequestException as e:
+        logging.warning("vLLM API 请求失败: %s", e)
     except Exception as e:
-        logging.warning("Qwen 验证过程出错: %s", e)
+        logging.warning("vLLM 验证过程出错: %s", e)
+        import traceback
+        traceback.print_exc()
 
     return False
 
@@ -198,6 +239,7 @@ def load_transforms(
     Dict[str, str],
     Dict[str, np.ndarray],
 ]:
+def load_transforms(scene_dir: Path, image_names: Optional[set[str]] = None) -> Tuple[Dict[str, np.ndarray], Dict[str, np.ndarray], str, Dict[str, Tuple[int, int]], Dict[str, str], Dict[str, np.ndarray]]:
     """
     读取相机与图像路径，返回
       intr_map[stem] = 3x3 K
@@ -209,9 +251,12 @@ def load_transforms(
 
     支持：ScanNet++ nerfstudio、DL3DV、ScanNet v2（color + intrinsic + pose）、
     ScanNet 变体（cam npz + color）。
+      path_map[stem] = image_path
+      mask_map[stem] = image mask (0/1, bool array)
     """
     # scannetppv2
     if (scene_dir / "dslr").exists():
+    if (scene_dir/"dslr").exists():
         scene_type = "scannetppv2"
         json_path = scene_dir / "dslr/nerfstudio/transforms_undistorted.json"
         with json_path.open("r", encoding="utf-8") as f:
@@ -230,7 +275,15 @@ def load_transforms(
 
         mask_dir = scene_dir / "mask"
 
+        mask_map: Dict[str, np.ndarray] = {}
+        
+        mask_dir = scene_dir / "mask"
+        
         for frame in [*train_frames, *test_frames]:
+            stem = Path(frame["file_path"]).stem
+            if image_names is not None and stem not in image_names:
+                continue
+
             stem = Path(frame["file_path"]).stem
             if image_names is not None and stem not in image_names:
                 continue
@@ -264,7 +317,25 @@ def load_transforms(
                 # 如果没有 mask，创建一个全为 True 的 mask
                 mask_map[stem] = np.ones((frame_h, frame_w), dtype=bool)
 
+            path_map[stem] = str(scene_dir / "dslr/" / "resized_undistorted_images" /frame["file_path"])
+            
+            # 加载 mask
+            mask_path = mask_dir / f"{stem}.png"
+            if mask_path.exists():
+                mask = load_mask(mask_path)
+                # 调整 mask 尺寸以匹配图像尺寸
+                if mask.shape[:2] != (frame_h, frame_w):
+                    mask_img = Image.fromarray(mask.astype(np.uint8) * 255)
+                    mask_resized = mask_img.resize((frame_w, frame_h), resample=Image.NEAREST)
+                    mask = (np.array(mask_resized) > 0).astype(bool)
+                mask_map[stem] = mask
+            else:
+                print(f"No mask found for {stem}")
+                # 如果没有 mask，创建一个全为 True 的 mask
+                mask_map[stem] = np.ones((frame_h, frame_w), dtype=bool)
+            
         logging.info("加载位姿完成，数量: %d", len(intr_map))
+        return intr_map, c2w_map, scene_type, size_map, path_map, mask_map
         return intr_map, c2w_map, scene_type, size_map, path_map, mask_map
     # dl3dv
     elif (scene_dir / "dense").exists():
@@ -281,6 +352,15 @@ def load_transforms(
         mask_dir = scene_dir / "mask"
 
         for idx, cam_file in tqdm(enumerate(cam_files), total=len(cam_files)):
+            stem = Path(cam_file).stem
+            if image_names is not None and stem not in image_names:
+                continue
+
+        mask_map: Dict[str, np.ndarray] = {}
+        
+        mask_dir = scene_dir / "mask"
+        
+        for idx, cam_file in tqdm(enumerate(cam_files),total=len(cam_files),):
             stem = Path(cam_file).stem
             if image_names is not None and stem not in image_names:
                 continue
@@ -317,9 +397,15 @@ def load_transforms(
             if "width" in cam_data and "height" in cam_data:
                 img_w, img_h = int(cam_data["width"]), int(cam_data["height"])
                 size_map[stem] = (img_w, img_h)
+            
+            if 'width' in cam_data and 'height' in cam_data:
+                img_w, img_h = int(cam_data['width']), int(cam_data['height'])
+                size_map[stem] = (img_w, img_h)
             else:
                 # 如果没有尺寸，尝试读取第一张图获取尺寸
                 with Image.open(img_path) as img:
+                    img_w, img_h = img.size
+                    size_map[stem] = (img_w, img_h)
                     img_w, img_h = img.size
                     size_map[stem] = (img_w, img_h)
             path_map[stem] = str(img_path)
@@ -338,6 +424,22 @@ def load_transforms(
                 # 如果没有 mask，创建一个全为 True 的 mask
                 mask_map[stem] = np.ones((img_h, img_w), dtype=bool)
 
+            
+            # 加载 mask
+            mask_path = mask_dir / f"{stem}.png"
+            if mask_path.exists():
+                mask = load_mask(mask_path)
+                # 调整 mask 尺寸以匹配图像尺寸
+                if mask.shape[:2] != (img_h, img_w):
+                    mask_img = Image.fromarray(mask.astype(np.uint8) * 255)
+                    mask_resized = mask_img.resize((img_w, img_h), resample=Image.NEAREST)
+                    mask = (np.array(mask_resized) > 0).astype(bool)
+                mask_map[stem] = mask
+            else:
+                print(f"No mask found for {stem}")
+                # 如果没有 mask，创建一个全为 True 的 mask
+                mask_map[stem] = np.ones((img_h, img_w), dtype=bool)
+            
         logging.info("加载位姿完成，数量: %d", len(intr_map))
         return intr_map, c2w_map, scene_type, size_map, path_map, mask_map
     # ScanNet v2 官方结构: color/, intrinsic/intrinsic_color.txt, pose/*.txt
@@ -487,6 +589,163 @@ def load_transforms(
 
         logging.info("加载位姿完成，数量: %d", len(intr_map))
         return intr_map, c2w_map, scene_type, size_map, path_map, mask_map
+        return intr_map, c2w_map, scene_type, size_map, path_map, mask_map
+    # scannetv2
+    elif (scene_dir / "intrinsic").exists() and (scene_dir / "pose").exists() and (scene_dir / "color").exists():
+        scene_type = "scannetv2"
+        intrinsic_dir = scene_dir / "intrinsic"
+        pose_dir = scene_dir / "pose"
+        rgb_dir = scene_dir / "color"
+        mask_dir = scene_dir / "mask"
+
+        intrinsic_path = intrinsic_dir / "intrinsic_color.txt"
+        if not intrinsic_path.exists():
+            raise FileNotFoundError(f"未找到 scannetv2 内参文件: {intrinsic_path}")
+        intrinsic_mat = np.loadtxt(intrinsic_path, dtype=np.float32)
+        if intrinsic_mat.shape[0] < 3 or intrinsic_mat.shape[1] < 3:
+            raise ValueError(f"scannetv2 内参矩阵形状异常: {intrinsic_path}, shape={intrinsic_mat.shape}")
+        K = intrinsic_mat[:3, :3].astype(np.float32)
+
+        pose_files = sorted([f for f in os.listdir(pose_dir) if f.endswith(".txt")])
+        intr_map: Dict[str, np.ndarray] = {}
+        c2w_map: Dict[str, np.ndarray] = {}
+        size_map: Dict[str, Tuple[int, int]] = {}
+        path_map: Dict[str, str] = {}
+        mask_map: Dict[str, np.ndarray] = {}
+
+        for _, pose_file in tqdm(enumerate(pose_files), total=len(pose_files)):
+            stem = Path(pose_file).stem
+            if image_names is not None and stem not in image_names:
+                continue
+
+            pose_path = pose_dir / pose_file
+            c2w = np.loadtxt(pose_path, dtype=np.float32)
+            if c2w.shape != (4, 4):
+                logging.warning("跳过异常位姿文件 %s, shape=%s", pose_path, c2w.shape)
+                continue
+
+            img_path = rgb_dir / f"{stem}.jpg"
+            if not img_path.exists():
+                img_path = rgb_dir / f"{stem}.png"
+            if not img_path.exists():
+                logging.warning("scannetv2 未找到对应图像，跳过: %s", stem)
+                continue
+
+            with Image.open(img_path) as img:
+                img_w, img_h = img.size
+
+            intr_map[stem] = K.copy()
+            c2w_map[stem] = c2w
+            size_map[stem] = (img_w, img_h)
+            path_map[stem] = str(img_path)
+
+            mask_path = mask_dir / f"{stem}.png"
+            if mask_path.exists():
+                mask = load_mask(mask_path)
+                if mask.shape[:2] != (img_h, img_w):
+                    mask_img = Image.fromarray(mask.astype(np.uint8) * 255)
+                    mask_resized = mask_img.resize((img_w, img_h), resample=Image.NEAREST)
+                    mask = (np.array(mask_resized) > 0).astype(bool)
+                mask_map[stem] = mask
+            else:
+                mask_map[stem] = np.ones((img_h, img_w), dtype=bool)
+
+        logging.info("加载位姿完成，数量: %d", len(intr_map))
+        return intr_map, c2w_map, scene_type, size_map, path_map, mask_map
+    # scannet
+    elif (scene_dir/"cam").exists() and (scene_dir/"color").exists():
+        scene_type = "scannet"
+        cam_dir = scene_dir / "cam"
+        rgb_dir = scene_dir / "color"
+        cam_files = sorted([f for f in os.listdir(cam_dir) if f.endswith('.npz')])
+        intr_map: Dict[str, np.ndarray] = {}
+        c2w_map: Dict[str, np.ndarray] = {}
+        size_map: Dict[str, Tuple[int, int]] = {}
+        path_map: Dict[str, str] = {}
+        mask_map: Dict[str, np.ndarray] = {}
+        
+        mask_dir = scene_dir / "mask"
+        
+        for idx, cam_file in tqdm(enumerate(cam_files), total=len(cam_files)):
+            stem = Path(cam_file).stem
+            if image_names is not None and stem not in image_names:
+                continue
+
+            cam_file_path = os.path.join(cam_dir, cam_file)
+            cam_data = np.load(cam_file_path)
+            if 'intrinsic' in cam_data:
+                intrinsic = cam_data['intrinsic']
+                fx, fy, cx, cy = intrinsic[0, 0], intrinsic[1, 1], intrinsic[0, 2], intrinsic[1, 2]
+            elif 'intrinsics' in cam_data:
+                intrinsics = cam_data['intrinsics']
+                fx, fy, cx, cy = intrinsics[0, 0], intrinsics[1, 1], intrinsics[0, 2], intrinsics[1, 2]
+            else:
+                raise ValueError(f"No intrinsics found in {cam_file}. Available keys: {list(cam_data.keys())}")
+            
+            c2w = cam_data['pose']
+            K = np.array([[fx, 0, cx], [0, fy, cy], [0, 0, 1]], dtype=np.float32)
+            intr_map[stem] = K
+            c2w_map[stem] = c2w
+            
+            # 查找图片，支持 png, jpg 和 npz
+            img_path = rgb_dir / f"{stem}.png"
+            if not img_path.exists():
+                img_path = rgb_dir / f"{stem}.jpg"
+            if not img_path.exists():
+                img_path = rgb_dir / f"{stem}.npz"
+            
+            if 'width' in cam_data and 'height' in cam_data:
+                img_w, img_h = int(cam_data['width']), int(cam_data['height'])
+                size_map[stem] = (img_w, img_h)
+            else:
+                if img_path.suffix in ['.png', '.jpg']:
+                    with Image.open(img_path) as img:
+                        img_w, img_h = img.size
+                        size_map[stem] = (img_w, img_h)
+                elif img_path.suffix == '.npz':
+                    img_data = np.load(img_path)
+                    # 尝试常见的 key
+                    if 'image' in img_data:
+                        h, w = img_data['image'].shape[:2]
+                    elif 'color' in img_data:
+                        h, w = img_data['color'].shape[:2]
+                    else:
+                        raise ValueError(f"No image found in {img_path}")
+                    img_w, img_h = w, h
+                    size_map[stem] = (img_w, img_h)
+            path_map[stem] = str(img_path)
+            
+            # 加载 mask
+            mask_path = mask_dir / f"{stem}.png"
+            if mask_path.exists():
+                mask = load_mask(mask_path)
+                # 调整 mask 尺寸以匹配图像尺寸
+                if mask.shape[:2] != (img_h, img_w):
+                    mask_img = Image.fromarray(mask.astype(np.uint8) * 255)
+                    mask_resized = mask_img.resize((img_w, img_h), resample=Image.NEAREST)
+                    mask = (np.array(mask_resized) > 0).astype(bool)
+                mask_map[stem] = mask
+            else:
+                # 如果没有 mask，创建一个全为 True 的 mask
+                mask_map[stem] = np.ones((img_h, img_w), dtype=bool)
+            
+        logging.info("加载位姿完成，数量: %d", len(intr_map))
+        return intr_map, c2w_map, scene_type, size_map, path_map, mask_map
+    else:
+        raise NotImplementedError(f"不支持的场景格式: {scene_dir}, 目前只支持scannetppv2, dl3dv, scannetv2和scannet.")
+
+
+
+def load_mask(mask_path: Path) -> np.ndarray:
+    mask = Image.open(mask_path).convert("L")
+    return np.array(mask) > 0
+
+
+def encode_mask(mask: np.ndarray) -> dict:
+    """将 mask 编码为 RLE 格式，与 agent.py 中的保存方式一致"""
+    rle = mask_utils.encode(np.asarray(mask, order="F"))
+    rle["counts"] = rle["counts"].decode("utf-8")
+    return rle
 
 
 def resize_mask_to_depth(mask: np.ndarray, depth: np.ndarray) -> np.ndarray:
@@ -568,7 +827,7 @@ def compute_obb(pts: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         raise ValueError(f"OBB 计算至少需要 3 个点，当前: {pts.shape[0]}")
 
     T, extents = trimesh.bounds.oriented_bounds(pts)
-    # oriented_bounds 返回的是“将点变到 OBB 局部坐标系”的矩阵，需要取逆才能作为 box 的 world transform
+    # oriented_bounds 返回的是"将点变到 OBB 局部坐标系"的矩阵，需要取逆才能作为 box 的 world transform
     T = np.linalg.inv(T).astype(np.float32)
     extents = extents.astype(np.float32)
     return T, extents
@@ -615,7 +874,7 @@ def obb_overlap(
     extents_a: np.ndarray,
     transform_b: np.ndarray,
     extents_b: np.ndarray,
-    intersect_ratio: float = 0.33,
+    intersect_ratio: float = 0.2,
 ) -> bool:
     """计算两个 OBB 的交叠体积，判断是否重叠。
     
@@ -929,7 +1188,7 @@ def log_rerun_scene(
     color_map: Dict[str, np.ndarray],
     cam_max_size: int,
     scene: str,
-    scene_type: Literal["scannetppv2", "dl3dv"],
+    scene_type: Literal["scannetppv2", "dl3dv", "scannet"],
     include_labels: Optional[set[str]],
     rerun_addr: Optional[str],
     rerun_save_path: Optional[Path],
@@ -942,8 +1201,8 @@ def log_rerun_scene(
         return
 
     rr.init(f"3d_bounding_instance_gs/{scene}", spawn=False)
-    # nerfstudio/ScanNet++（OpenGL 相机，前向 -Z，Y 向上）推荐坐标系，避免视角倒置
-    if scene_type == "scannetppv2":
+    # nerfstudio/ScanNet/ScanNet++（OpenGL 相机，前向 -Z，Y 向上）推荐坐标系
+    if scene_type in ["scannetppv2", "scannet"]:
         rr.log("/", rr.ViewCoordinates.RUB)  # Right, Up, Back
 
     if rerun_addr:
@@ -1054,11 +1313,16 @@ def process_scene(
     rerun_addr: Optional[str],
     rerun_save_path: Optional[Path],
     cam_max_size: int,
+    vllm_api_url: str = DEFAULT_VLLM_API_URL,
+    scene_json_dir: str = "Qwen3VL-32B-DL3DV/1K",
 ) -> Path:
     scene_dir = data_root / scene
 
     # 尝试加载包含 100 张图的 JSON（先于 load_transforms，用于筛选视角）
     scene_json_path = scene_json_dir / f"{scene}.json"
+    
+    # 尝试加载包含 100 张图的 JSON（目录由 --scene-json-dir 指定）
+    scene_json_path = Path(scene_json_dir) / f"{scene}.json"
     image_names = None
     if scene_json_path.exists():
         logging.info("加载场景图片列表: %s", scene_json_path)
@@ -1066,9 +1330,13 @@ def process_scene(
             scene_data = json.load(f)
             per_image = scene_data.get("per_image", {})
             image_names = {Path(name).stem for name in per_image.keys()}
+            image_names = {Path(name).stem for name in per_image.keys()}
             logging.info("场景包含 %d 张图片", len(image_names))
     else:
-        logging.warning("场景图片列表不存在: %s，将渲染所有相机", scene_json_path)
+        logging.warning("场景图片列表不存在: %s", scene_json_path)
+
+    intr_map, c2w_map, scene_type, size_map, path_map, mask_map = load_transforms(scene_dir, image_names=image_names)
+    print('scene_type:', scene_type)
 
     intr_map, c2w_map, scene_type, size_map, path_map, mask_map = load_transforms(
         scene_dir, image_names=image_names
@@ -1095,8 +1363,8 @@ def process_scene(
             mask_score_map[path] = float(score)
             mask_to_item[path] = it
 
-    # 加载本地 Qwen 模型
-    vlm_model, vlm_processor = load_vlm_model(DEFAULT_VLM_MODEL_PATH)
+    # 初始化 vLLM 服务客户端
+    vlm_api_url = load_vlm_model(vllm_api_url)
 
     results: List[Dict] = []
     inst_counter = 1
@@ -1120,14 +1388,16 @@ def process_scene(
     # 按标签分组，逐标签处理，互不干扰
     label_groups: Dict[str, List[Dict]] = defaultdict(list)
     for item in items:
+        if str(item.get("label", "")).strip().lower() == "tile":
+            continue
         label_groups[item["label"]].append(item)
 
     for label, label_items in label_groups.items():
         logging.info("处理标签 %s，共 %d 个 mask", label, len(label_items))
         instances: List[Dict] = []
         if len(label_items) > 1000:
-            # 实例过多时均匀抽取 500 个进行重叠检查以加速
-            sampled = np.linspace(0, len(label_items) - 1, num=500, dtype=int)
+            # 实例过多时均匀抽取 100 个进行重叠检查以加速
+            sampled = np.linspace(0, len(label_items) - 1, num=100, dtype=int)
             label_items = [label_items[i] for i in sorted(set(int(x) for x in sampled))]
         for item in tqdm(label_items, desc=f"Processing {label}"):
 
@@ -1169,6 +1439,18 @@ def process_scene(
                     image_mask = (np.array(mask_resized) > 0).astype(bool)
                 mask = mask & image_mask
 
+            # 与 image mask 求与，被 mask 的部分不要投射
+            if stem in mask_map:
+                image_mask = mask_map[stem]
+                # 调整 image_mask 尺寸以匹配 instance mask
+                if image_mask.shape != mask.shape:
+                    mask_img = Image.fromarray(image_mask.astype(np.uint8) * 255)
+                    mask_resized = mask_img.resize((mask.shape[1], mask.shape[0]), resample=Image.NEAREST)
+                    image_mask = (np.array(mask_resized) > 0).astype(bool)
+                mask = mask & image_mask
+                
+            
+            
             points = mask_depth_to_points(mask, depth, intr_map[stem], c2w_map[stem])
             points = filter_outliers(points)
             if points.shape[0] < min_points:
@@ -1272,6 +1554,8 @@ def process_scene(
                 raw_image_path = data_root / scene / "dslr" / "resized_undistorted_images" / image_name
             elif scene_type == "dl3dv":
                 raw_image_path = data_root / scene / "dense" / "rgb" / image_name
+            elif scene_type == "scannetv2":
+                raw_image_path = data_root / scene / "color" / image_name
             else:
                 raw_image_path = data_root / scene /  "resized_undistorted_images" / image_name
 
@@ -1280,7 +1564,17 @@ def process_scene(
                 continue
 
             try:
-                raw_image = Image.open(raw_image_path).convert("RGB")
+                if raw_image_path.suffix == '.npz':
+                    img_data = np.load(raw_image_path)
+                    if 'image' in img_data:
+                        raw_image_np = img_data['image']
+                    elif 'color' in img_data:
+                        raw_image_np = img_data['color']
+                    else:
+                        raise ValueError(f"No image found in {raw_image_path}")
+                    raw_image = Image.fromarray(raw_image_np).convert("RGB")
+                else:
+                    raw_image = Image.open(raw_image_path).convert("RGB")
                 
                 if "mask_rle" in item:
                     rle = item["mask_rle"]
@@ -1319,7 +1613,7 @@ def process_scene(
                 )
                 overlay_image = Image.fromarray(viz.output.get_image())
                 
-                if verify_label_with_vlm(vlm_model, vlm_processor, raw_image, overlay_image, zoomed_image, label):
+                if verify_label_with_vlm(vlm_api_url, raw_image, overlay_image, zoomed_image, label):
                     logging.info("VLM 召回了低分实例 (label: %s, highest_score: %.2f, image: %s)", 
                                  label, mask_score_map.get(highest_conf_mask_path, 0.0), raw_image_path)
                     qualified_instances.append(inst)
@@ -1328,37 +1622,33 @@ def process_scene(
                 import traceback
                 traceback.print_exc()
 
-        # 2. 对同一类别的实例进行二次 overlap 检测 (阈值 0.8)
-        # final_instances = []
-        # for q_inst in qualified_instances:
-        #     q_transform = q_inst["obb_transform"]
-        #     q_extents = q_inst["obb_extents"]
-            
-        #     merged = False
-        #     for f_idx, f_inst in enumerate(final_instances):
-        #         # 如果重叠度 > 0.8，则融合
-        #         if obb_overlap(q_transform, q_extents, f_inst["obb_transform"], f_inst["obb_extents"], intersect_ratio=0.8):
-        #             f_inst["points"].extend(q_inst["points"])
-        #             f_inst["images"] |= q_inst["images"]
-        #             # 合并 mask 编码
-        #             if "mask_encodings" not in f_inst:
-        #                 f_inst["mask_encodings"] = {}
-        #             if "mask_encodings" in q_inst:
-        #                 f_inst["mask_encodings"].update(q_inst["mask_encodings"])
-                    
-        #             # 重新计算融合后的 OBB
-        #             all_pts = np.concatenate(f_inst["points"], axis=0)
-        #             if instance_max_points > 0 and all_pts.shape[0] > instance_max_points:
-        #                 idx = np.random.choice(all_pts.shape[0], instance_max_points, replace=False)
-        #                 all_pts = all_pts[idx]
-        #             f_inst["obb_transform"], f_inst["obb_extents"] = compute_obb(all_pts)
-        #             merged = True
-        #             break
-            
-        #     if not merged:
-        #         final_instances.append(q_inst)
-        final_instances = qualified_instances 
-        logging.info("标签 %s 最终过滤与vlm召回后剩余 %d 个实例", label, len(qualified_instances))
+        # 2. 对同一类别的实例进行二次 overlap 检测（重叠区域占任一实例达 0.3 则合并）
+        final_instances = []
+        for q_inst in qualified_instances:
+            q_transform = q_inst["obb_transform"]
+            q_extents = q_inst["obb_extents"]
+
+            merged = False
+            for f_idx, f_inst in enumerate(final_instances):
+                if obb_overlap(q_transform, q_extents, f_inst["obb_transform"], f_inst["obb_extents"], intersect_ratio=0.3):
+                    f_inst["points"].extend(q_inst["points"])
+                    f_inst["images"] |= q_inst["images"]
+                    if "mask_encodings" not in f_inst:
+                        f_inst["mask_encodings"] = {}
+                    if "mask_encodings" in q_inst:
+                        f_inst["mask_encodings"].update(q_inst["mask_encodings"])
+
+                    all_pts = np.concatenate(f_inst["points"], axis=0)
+                    if instance_max_points > 0 and all_pts.shape[0] > instance_max_points:
+                        idx = np.random.choice(all_pts.shape[0], instance_max_points, replace=False)
+                        all_pts = all_pts[idx]
+                    f_inst["obb_transform"], f_inst["obb_extents"] = compute_obb(all_pts)
+                    merged = True
+                    break
+
+            if not merged:
+                final_instances.append(q_inst)
+        logging.info("标签 %s 最终过滤、vlm召回及 overlap 合并后剩余 %d 个实例", label, len(final_instances))
 
         # 3. 记录最终结果
         for inst in final_instances:
@@ -1373,19 +1663,17 @@ def process_scene(
             
             sorted_images = sorted(inst["images"])
             
-            # 使用相对路径保存图像路径 (相对于当前运行目录，通常是项目根目录)
-            def to_rel(p):
+            # 使用绝对路径保存图像路径（规范化路径，去除 .. 等符号）
+            def to_abs(p):
                 try:
-                    # 如果已经是相对路径则直接返回，否则转为相对于当前目录的路径
-                    if os.path.isabs(p):
-                        return os.path.relpath(p, os.getcwd())
-                    return p
+                    # os.path.abspath 会自动规范化路径并转换为绝对路径
+                    return os.path.abspath(os.path.normpath(str(p)))
                 except Exception:
                     return str(p)
 
-            rel_images = [to_rel(img) for img in sorted_images]
+            abs_images = [to_abs(img) for img in sorted_images]
             highest_conf_mask = max(inst["images"], key=lambda img: mask_score_map.get(img, 0.0))
-            rel_highest_conf_mask = to_rel(highest_conf_mask)
+            abs_highest_conf_mask = to_abs(highest_conf_mask)
 
             for img_path in sorted_images:
                 if img_path in mask_encodings_dict:
@@ -1398,8 +1686,8 @@ def process_scene(
                     "bounding_box": bbox,
                     "obb_transform": transform.tolist(),
                     "obb_extents": extents.tolist(),
-                    "images": rel_images,
-                    "highest_confidence_mask": rel_highest_conf_mask,
+                    "images": abs_images,
+                    "highest_confidence_mask": abs_highest_conf_mask,
                     "mask_encodings": mask_encodings_list,
                 }
             )
@@ -1528,6 +1816,18 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="可选，将日志保存为 rrd 文件（便于远程下载/离线回放）",
     )
+    parser.add_argument(
+        "--vllm-api-url",
+        type=str,
+        default=DEFAULT_VLLM_API_URL,
+        help=f"vLLM 服务的 API 地址（默认: {DEFAULT_VLLM_API_URL}）",
+    )
+    parser.add_argument(
+        "--scene-json-dir",
+        type=str,
+        default="Qwen3VL-32B-DL3DV/1K",
+        help="场景图片列表 JSON 所在目录，每个场景对应 {scene}.json（默认: Qwen3VL-32B-DL3DV/1K）",
+    )
     return parser.parse_args()
 
 
@@ -1563,6 +1863,8 @@ def main() -> None:
         rerun_addr=args.rerun_addr,
         rerun_save_path=rerun_save_path,
         cam_max_size=args.rerun_cam_max_size,
+        vllm_api_url=args.vllm_api_url,
+        scene_json_dir=args.scene_json_dir,
     )
 
 

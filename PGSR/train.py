@@ -175,15 +175,25 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         image, viewspace_point_tensor, visibility_filter, radii = \
             render_pkg["render"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
         
-        # Loss
-        image_supervision = crop_supervision_border(image, border=12)
-        gt_image_supervision = crop_supervision_border(gt_image, border=12)
-        ssim_loss = (1.0 - ssim(image_supervision, gt_image_supervision))
-        if 'app_image' in render_pkg and ssim_loss < 0.5:
-            app_image = crop_supervision_border(render_pkg['app_image'], border=12)
-            Ll1 = l1_loss(app_image, gt_image_supervision)
+        # ScanNet v2: mask 上下左右 20px（畸变黑边）再算图像损失
+        EDGE_MARGIN = 20
+        H, W = image.shape[1], image.shape[2]
+        if H > 2 * EDGE_MARGIN and W > 2 * EDGE_MARGIN:
+            image_for_loss = image[:, EDGE_MARGIN:H - EDGE_MARGIN, EDGE_MARGIN:W - EDGE_MARGIN]
+            gt_for_loss = gt_image[:, EDGE_MARGIN:H - EDGE_MARGIN, EDGE_MARGIN:W - EDGE_MARGIN]
         else:
-            Ll1 = l1_loss(image_supervision, gt_image_supervision)
+            image_for_loss = image
+            gt_for_loss = gt_image
+
+        # Loss
+        ssim_loss = (1.0 - ssim(image_for_loss, gt_for_loss))
+        if 'app_image' in render_pkg and ssim_loss < 0.5:
+            app_image = render_pkg['app_image']
+            if H > 2 * EDGE_MARGIN and W > 2 * EDGE_MARGIN:
+                app_image = app_image[:, EDGE_MARGIN:H - EDGE_MARGIN, EDGE_MARGIN:W - EDGE_MARGIN]
+            Ll1 = l1_loss(app_image, gt_for_loss)
+        else:
+            Ll1 = l1_loss(image_for_loss, gt_for_loss)
         image_loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * ssim_loss
         loss = image_loss.clone()
         
@@ -215,9 +225,16 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 Depth = crop_supervision_border(render_pkg['plane_depth'], border=12)
                 mono_invdepth = crop_supervision_border(viewpoint_cam.depth_map.cuda(), border=12)
                 # depth_mask = viewpoint_cam.depth_mask.cuda()
-
-                Ll1depth_pure = torch.abs((Depth  - mono_invdepth) ).mean()
-                Ll1depth = depth_l1_weight(iteration) * Ll1depth_pure 
+                # ScanNet v2: 深度损失也去掉上下左右 20px
+                if Depth.dim() == 3:
+                    dh, dw = Depth.shape[1], Depth.shape[2]
+                else:
+                    dh, dw = Depth.shape[0], Depth.shape[1]
+                if dh > 2 * EDGE_MARGIN and dw > 2 * EDGE_MARGIN:
+                    Depth = Depth[..., EDGE_MARGIN:dh - EDGE_MARGIN, EDGE_MARGIN:dw - EDGE_MARGIN]
+                    mono_invdepth = mono_invdepth[..., EDGE_MARGIN:dh - EDGE_MARGIN, EDGE_MARGIN:dw - EDGE_MARGIN]
+                Ll1depth_pure = torch.abs((Depth - mono_invdepth)).mean()
+                Ll1depth = depth_l1_weight(iteration) * Ll1depth_pure
                 loss += Ll1depth
 
 
@@ -267,7 +284,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     d_mask = d_mask
                     weights = torch.ones_like(pixel_noise)
                     weights[~d_mask] = 0
-                if iteration % 200 == 0:
+                if iteration % 2000 == 0:
                     gt_img_show = ((gt_image).permute(1,2,0).clamp(0,1)[:,:,[2,1,0]]*255).detach().cpu().numpy().astype(np.uint8)
                     if 'app_image' in render_pkg:
                         img_show = ((render_pkg['app_image']).permute(1,2,0).clamp(0,1)[:,:,[2,1,0]]*255).detach().cpu().numpy().astype(np.uint8)
