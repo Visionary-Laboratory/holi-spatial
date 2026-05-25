@@ -1,4 +1,4 @@
-# [ICML 2026 Spotlight] Holi-Spatial: Evolving Video Streams into Holistic 3D Spatial Intelligence
+# [ICML 2026 Oral] Holi-Spatial: Evolving Video Streams into Holistic 3D Spatial Intelligence
 
 <p align="center">
   <img src="assets/teaser.png" width="100%">
@@ -17,6 +17,7 @@
 - [x] We release the project page of Holi-Spatial, check on [here](https://visionary-laboratory.github.io/holi-spatial/).
 - [x] We have released a subset of the [Holi-Spatial dataset](https://huggingface.co/Holi-Spatial), featuring **2,000+ high-quality Gaussian models**, each accompanied by its corresponding **mesh** and **scene-level 3D bounding box annotations**, together with **HoliSpatial-QA-2M**, a **2-million-scale QA dataset** built upon part of these richly annotated 3D assets.
 - [x] We release all model checkpoints.
+- [ ] We will release the pipeline code in July.
 
 ## Citation
 
