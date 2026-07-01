@@ -668,9 +668,6 @@ if __name__ == "__main__":
     print("模型加载完成")
     
     # 从 COLMAP 数据加载 pose
-    # folder = '/mnt/shared-storage-user/solution/liuyifei/datasets/processed_dl3dv_ours/1K'
-    # dl3dv_dirs = [os.path.join(folder, d) for d in os.listdir(folder) if os.path.isdir(os.path.join(folder, d))]
-    # dl3dv_dirs = sorted(dl3dv_dirs)[:10]
     if args.dl3dv_dirs is not None and args.dl3dv_dirs != "":
         dl3dv_dirs = [os.path.join(args.dl3dv_dirs, d) for d in os.listdir(args.dl3dv_dirs) if os.path.isdir(os.path.join(args.dl3dv_dirs, d))]
         dl3dv_dirs = sorted(dl3dv_dirs)

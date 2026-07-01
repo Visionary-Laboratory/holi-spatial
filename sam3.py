@@ -16,9 +16,10 @@ from sam3.model_builder import build_sam3_image_model
 from sam3.model.sam3_image_processor import Sam3Processor
 
 
-DEFAULT_DATA_ROOT = Path("/home/liuyifei/code/posevlm/scannetppv2/data")
+DEFAULT_DATA_ROOT = Path("scannetppv2/data")
 DEFAULT_SCENE_JSON = Path("scene_objects_Qwen3-VL-30B-A3B-Instruct-DL3DV/0a5c013435.json")
-DEFAULT_OUTPUT_DIR = Path("/home/liuyifei/code/posevlm/sam_masks_debug_dl3dv")
+DEFAULT_OUTPUT_DIR = Path("sam_masks_debug")
+DEFAULT_SAM3_CHECKPOINT = None
 
 
 def setup_logger() -> None:
@@ -185,19 +186,17 @@ def process_scene(
     scene_json: Path,
     data_root: Path,
     output_dir: Path,
+    sam3_checkpoint: Optional[Path] = DEFAULT_SAM3_CHECKPOINT,
     save_mask_images: bool = False,
 ) -> Path:
     scene_name, per_image = load_scene_json(scene_json)
 
     data_root_str = str(data_root).lower()
-    if "scannetv2" in data_root_str:
+    if "scannetv2" in data_root_str or "scannet" in data_root_str and "scannetpp" not in data_root_str:
         image_root = data_root / scene_name / "color"
     elif "scannetppv2" in data_root_str:
         image_root = data_root / scene_name / "dslr" / "resized_undistorted_images"
-    elif "scannetv2" in data_root_str:
-        # ScanNet v2: scans/<scene_id>/color/*.jpg
-        image_root = data_root / scene_name / "color"
-    elif "DL3DV" in data_root_str:
+    elif "dl3dv" in data_root_str:
         image_root = data_root / scene_name / "dense" / "rgb"
     else:
         # 默认使用 scannetppv2 的路径
@@ -208,7 +207,8 @@ def process_scene(
         raise FileNotFoundError(f"找不到图片目录: {image_root}")
 
     logging.info("加载模型...")
-    model = build_sam3_image_model(checkpoint_path="/mnt/shared-storage-user/solution/huggingface/hub/models--facebook--sam3/snapshots/2afe64078f4420bdfbc063162d1336003efadc81/sam3.pt")
+    checkpoint_path = str(sam3_checkpoint) if sam3_checkpoint else None
+    model = build_sam3_image_model(checkpoint_path=checkpoint_path)
     processor = Sam3Processor(model, confidence_threshold=0.6)
 
     all_results: List[Dict] = []
@@ -262,6 +262,12 @@ def parse_args() -> argparse.Namespace:
         help="mask 及索引输出目录",
     )
     parser.add_argument(
+        "--sam3-checkpoint",
+        type=Path,
+        default=DEFAULT_SAM3_CHECKPOINT,
+        help="SAM3 checkpoint 路径；不指定时由 sam3.model_builder 从 Hugging Face 下载",
+    )
+    parser.add_argument(
         "--save-mask-images",
         action="store_true",
         help="是否显式保存黑白 mask 图片 (PNG)",
@@ -272,7 +278,13 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     setup_logger()
     args = parse_args()
-    process_scene(args.scene_json, args.data_root, args.output_dir, save_mask_images=args.save_mask_images)
+    process_scene(
+        args.scene_json,
+        args.data_root,
+        args.output_dir,
+        sam3_checkpoint=args.sam3_checkpoint,
+        save_mask_images=args.save_mask_images,
+    )
 
 
 if __name__ == "__main__":

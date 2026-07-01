@@ -43,7 +43,7 @@ DEFAULT_OUTPUT_DIR = Path("output_3d_bounding/output_3d_bounding_mask_z")
 DEFAULT_GS_MODEL = Path("pgsr_scannet") / DEFAULT_SCENE
 DEFAULT_RERUN = True
 MAX_POINT_COUNT = 5_000_000
-DEFAULT_VLM_MODEL_PATH = "/mnt/shared-storage-user/solution/huggingface/hub/models--Qwen--Qwen3-VL-30B-A3B-Thinking/snapshots/d0ed0380729be07a546fdefafbb4fe411f341e92/"
+DEFAULT_VLM_MODEL_PATH = ""
 DEFAULT_VLLM_API_URL = "http://127.0.0.1:8000/v1/chat/completions"
 
 
@@ -724,17 +724,15 @@ def load_da3_depths(
 ) -> Tuple[Dict[str, np.ndarray], Dict[str, np.ndarray]]:
     """
     加载 da3 深度图，替代高斯渲染。
-    对于 DL3DV 场景：深度文件在 scene_dir / "dense" / "depth_da3" 目录下，格式为 frame_XXXXX.npy
-    对于 ScanNet++ v2 场景：深度文件在 /home/liuyifei/yifei-code/Mental2/Mentalcube2/scannetppv2_extra/data/scene_id/depth_da3 目录下
+    DA3 预处理会在 scene_dir / "depth_da3" 下保存每帧深度；兼容旧的 dense/depth_da3。
     """
     if scene_type == "scannetppv2":
-        # ScanNet++ v2 场景：使用指定路径
-        depth_dir = Path(f"/home/liuyifei/yifei-code/Mental2/Mentalcube2/scannetppv2_extra/data/{scene_id}/depth_da3")
         rgb_dir = scene_dir / "dslr" / "resized_undistorted_images"
     else:
-        # DL3DV 场景：使用原有路径
-        depth_dir = scene_dir / "dense" / "depth_da3"
         rgb_dir = scene_dir / "dense" / "rgb"
+    depth_dir = scene_dir / "depth_da3"
+    if not depth_dir.exists() and scene_type == "dl3dv":
+        depth_dir = scene_dir / "dense" / "depth_da3"
     
     depth_map: Dict[str, np.ndarray] = {}
     color_map: Dict[str, np.ndarray] = {}
@@ -1041,6 +1039,7 @@ def process_scene(
     scene: str,
     data_root: Path,
     mask_root: Path,
+    scene_json_dir: Path,
     model_path: Path,
     iteration: int,
     output_dir: Path,
@@ -1057,8 +1056,8 @@ def process_scene(
 ) -> Path:
     scene_dir = data_root / scene
     
-    # 尝试加载包含 100 张图的 JSON
-    scene_json_path = Path("scene_objects_Qwen3-VL-30B-A3B-Instruct") / f"{scene}.json"
+    # 尝试加载 VLM 采样图像列表，保证 3D lifting 与前一步类别/mask 对齐。
+    scene_json_path = scene_json_dir / f"{scene}.json"
     image_names = None
     if scene_json_path.exists():
         logging.info("加载场景图片列表: %s", scene_json_path)
@@ -1488,6 +1487,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--scene", default=DEFAULT_SCENE, help="场景名，如 0a5c013435")
     parser.add_argument("--data-root", type=Path, default=DEFAULT_DATA_ROOT, help="scannetppv2/data 根目录")
     parser.add_argument("--mask-root", type=Path, default=DEFAULT_MASK_ROOT, help="sam mask 根目录（含 mask_index.json）")
+    parser.add_argument(
+        "--scene-json-dir",
+        type=Path,
+        default=Path("scene_objects_Qwen3-VL-30B-A3B-Instruct"),
+        help="classic_vllm.py 输出的 per-image 标签 JSON 目录",
+    )
     parser.add_argument("--model-path", "-m", type=Path, default=DEFAULT_GS_MODEL, help="3DGS 模型目录（含 cfg_args）")
     parser.add_argument("--iteration", type=int, default=-1, help="加载的迭代编号，-1 表示自动最新")
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR, help="输出 3D bbox 保存目录")
@@ -1571,6 +1576,7 @@ def main() -> None:
         scene=args.scene,
         data_root=args.data_root,
         mask_root=args.mask_root,
+        scene_json_dir=args.scene_json_dir,
         model_path=args.model_path,
         iteration=args.iteration,
         output_dir=args.output_dir,
@@ -1595,4 +1601,3 @@ if __name__ == "__main__":
 # 2. 除了保存depth_points，还保存eroded mask points及他们的label，以便后续可视化。没有label的点，label赋值为others
 
 # vlm进行判断，消除sam的错误mask
-

@@ -1,120 +1,226 @@
-#!/bin/bash
+#!/usr/bin/env bash
+set -euo pipefail
 
-# 批量处理所有场景的脚本
-# 自动遍历 pgsr_scannetppv2_all/ 下的所有场景
-# 如果已存在 mesh/tsdf_fusion_post.ply 则跳过
-# 使用8张GPU并行处理，每张卡处理一个场景
+DATA_ROOT="${DATA_ROOT:-}"
+OUTPUT_ROOT="${OUTPUT_ROOT:-}"
+SCANNET_IMAGE_SUBDIR="${SCANNET_IMAGE_SUBDIR:-color}"
+SCANNETPP_NERFSTUDIO_SUBDIR="${SCANNETPP_NERFSTUDIO_SUBDIR:-dslr/nerfstudio}"
+SCANNETPP_IMAGE_SUBDIR="${SCANNETPP_IMAGE_SUBDIR:-dslr/resized_undistorted_images}"
+DL3DV_IMAGE_SUBDIR="${DL3DV_IMAGE_SUBDIR:-rgb}"
+RENDER_MAX_DEPTH="${RENDER_MAX_DEPTH:-4.0}"
+MASK_MAX_DEPTH="${MASK_MAX_DEPTH:-6.0}"
+VOXEL_SIZE="${VOXEL_SIZE:-0.006}"
+NUM_CLUSTER="${NUM_CLUSTER:-1}"
+MAX_PARALLEL="${MAX_PARALLEL:-}"
+NUM_GPUS="${NUM_GPUS:-}"
+FORCE="${FORCE:-0}"
+USE_DEPTH_FILTER="${USE_DEPTH_FILTER:-0}"
+MESH_PATH_REL="${MESH_PATH_REL:-mesh/tsdf_fusion_post.ply}"
+DONE_PLY_REL="point_cloud/iteration_30000/point_cloud.ply"
 
-echo "开始批量处理所有场景..."
+usage() {
+    cat <<'EOF'
+Render PGSR/3DGS meshes and generate mesh-guided masks for ScanNet v2, ScanNet++, or DL3DV.
 
-# 获取所有需要处理的场景列表
-SCENES_DIR="pgsr_scannetppv2_all"
-SCENES=()
+Required:
+  DATA_ROOT=/path/to/scenes        Directory containing scene folders.
+  OUTPUT_ROOT=/path/to/3dgs        Directory containing trained 3DGS outputs.
 
-# 遍历所有场景目录
-for scene_dir in "$SCENES_DIR"/*; do
-    if [ -d "$scene_dir" ]; then
-        scene=$(basename "$scene_dir")
-        mesh_file="$scene_dir/mesh/tsdf_fusion_post.ply"
-        
-        # 检查是否已存在 mesh 文件
-        if [ -f "$mesh_file" ]; then
-            echo "场景 $scene 已存在 mesh 文件，跳过: $mesh_file"
-            continue
-        fi
-        
-        # 检查必要的输入目录是否存在
-        nerfstudio_dir="scannetppv2/data/$scene/dslr/nerfstudio"
-        images_dir="scannetppv2/data/$scene/dslr/resized_undistorted_images"
-        
-        if [ ! -d "$nerfstudio_dir" ] || [ ! -d "$images_dir" ]; then
-            echo "警告: 场景 $scene 缺少必要的输入目录，跳过"
-            continue
-        fi
-        
-        SCENES+=("$scene")
-    fi
-done
+Optional:
+  NUM_GPUS=8                       Number of GPUs. Defaults to nvidia-smi count.
+  MAX_PARALLEL=8                   Max concurrent scenes. Defaults to NUM_GPUS.
+  RENDER_MAX_DEPTH=4.0             Max depth for TSDF fusion.
+  MASK_MAX_DEPTH=6.0               Max depth for mesh-to-mask filtering.
+  VOXEL_SIZE=0.006                 TSDF voxel size and mask depth threshold.
+  NUM_CLUSTER=1                    Number of connected mesh clusters to keep.
+  USE_DEPTH_FILTER=1               Enable PGSR render depth filtering.
+  FORCE=1                          Re-render mesh and masks even if outputs exist.
 
-echo "找到 ${#SCENES[@]} 个需要处理的场景"
-
-# 处理单个场景的函数
-process_scene() {
-    local scene=$1
-    local gpu_id=$2
-    
-    echo "[GPU $gpu_id] 开始处理场景: $scene"
-    
-    # 设置使用的GPU
-    export CUDA_VISIBLE_DEVICES=$gpu_id
-    
-    # 第一步: 渲染深度图
-    echo "[GPU $gpu_id] 场景 $scene: 开始渲染深度图..."
-    python PGSR/render.py \
-        -s "scannetppv2/data/$scene/dslr/nerfstudio" \
-        -m "pgsr_scannetppv2_all/$scene" \
-        --skip_test \
-        -i "scannetppv2/data/$scene/dslr/resized_undistorted_images"
-    
-    if [ $? -ne 0 ]; then
-        echo "[GPU $gpu_id] 错误: 场景 $scene 渲染失败"
-        return 1
-    fi
-    
-    # 第二步: 生成 mask
-    echo "[GPU $gpu_id] 场景 $scene: 开始生成 mask..."
-    python PGSR/mesh2mask.py \
-        -m "pgsr_scannetppv2_all/$scene" \
-        -s "scannetppv2/data/$scene/dslr/nerfstudio" \
-        --mesh_path "mesh/tsdf_fusion_post.ply"
-    
-    if [ $? -ne 0 ]; then
-        echo "[GPU $gpu_id] 错误: 场景 $scene mask 生成失败"
-        return 1
-    fi
-    
-    echo "[GPU $gpu_id] 场景 $scene 处理完成！"
-    return 0
+Examples:
+  DATA_ROOT=scannetv2/scans OUTPUT_ROOT=pgsr_scannetv2_all bash mesh.sh
+  DATA_ROOT=scannetppv2/data OUTPUT_ROOT=pgsr_scannetppv2_all bash mesh.sh
+EOF
 }
 
-# 使用8张GPU并行处理
-MAX_PARALLEL=3
-current_gpu=0
-pids=()
+if [ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ]; then
+    usage
+    exit 0
+fi
 
-# 处理所有场景
-for scene in "${SCENES[@]}"; do
-    # 等待有空闲的GPU
-    while [ ${#pids[@]} -ge $MAX_PARALLEL ]; do
-        # 检查已完成的进程
-        new_pids=()
-        for pid in "${pids[@]}"; do
-            if kill -0 "$pid" 2>/dev/null; then
-                new_pids+=("$pid")
-            fi
-        done
-        pids=("${new_pids[@]}")
-        
-        if [ ${#pids[@]} -ge $MAX_PARALLEL ]; then
-            sleep 5
+if [ -z "$DATA_ROOT" ] || [ -z "$OUTPUT_ROOT" ]; then
+    usage >&2
+    echo "Error: DATA_ROOT and OUTPUT_ROOT are required." >&2
+    exit 2
+fi
+
+if [ ! -d "$DATA_ROOT" ]; then
+    echo "Error: DATA_ROOT does not exist or is not a directory: $DATA_ROOT" >&2
+    exit 2
+fi
+
+if [ ! -d "$OUTPUT_ROOT" ]; then
+    echo "Error: OUTPUT_ROOT does not exist or is not a directory: $OUTPUT_ROOT" >&2
+    exit 2
+fi
+
+if [ -z "$NUM_GPUS" ]; then
+    if command -v nvidia-smi >/dev/null 2>&1; then
+        NUM_GPUS=$(nvidia-smi --query-gpu=index --format=csv,noheader,nounits | wc -l)
+    else
+        NUM_GPUS=1
+    fi
+fi
+
+if [ "$NUM_GPUS" -lt 1 ]; then
+    echo "Error: NUM_GPUS must be >= 1." >&2
+    exit 2
+fi
+
+if [ -z "$MAX_PARALLEL" ]; then
+    MAX_PARALLEL="$NUM_GPUS"
+fi
+
+scene_layout() {
+    local scene_dir="$1"
+    if [ -f "$scene_dir/$SCANNETPP_NERFSTUDIO_SUBDIR/transforms_undistorted.json" ] && \
+       [ -d "$scene_dir/$SCANNETPP_IMAGE_SUBDIR" ]; then
+        echo "scannetpp"
+    elif [ -d "$scene_dir/dense/cam" ] && [ -d "$scene_dir/dense/$DL3DV_IMAGE_SUBDIR" ]; then
+        echo "dl3dv"
+    elif [ -d "$scene_dir/pose" ] && [ -d "$scene_dir/$SCANNET_IMAGE_SUBDIR" ]; then
+        echo "scannet"
+    else
+        return 1
+    fi
+}
+
+set_scene_args() {
+    local scene_dir="$1"
+    local layout="$2"
+    SOURCE_PATH="$scene_dir"
+    IMAGE_ARG=()
+
+    case "$layout" in
+        scannetpp)
+            SOURCE_PATH="$scene_dir/$SCANNETPP_NERFSTUDIO_SUBDIR"
+            IMAGE_ARG=(-i "$scene_dir/$SCANNETPP_IMAGE_SUBDIR")
+            ;;
+        dl3dv)
+            IMAGE_ARG=(-i "$DL3DV_IMAGE_SUBDIR")
+            ;;
+        scannet)
+            IMAGE_ARG=(-i "$SCANNET_IMAGE_SUBDIR")
+            ;;
+        *)
+            echo "Error: unknown scene layout: $layout" >&2
+            return 1
+            ;;
+    esac
+}
+
+SCENES=()
+for scene_dir in "$DATA_ROOT"/*/; do
+    [ -d "$scene_dir" ] || continue
+    scene=$(basename "$scene_dir")
+    if ! layout=$(scene_layout "$scene_dir"); then
+        echo "Skip unrecognized scene layout: $scene"
+        continue
+    fi
+    if [ ! -f "$OUTPUT_ROOT/$scene/$DONE_PLY_REL" ]; then
+        echo "Skip scene without trained 3DGS: $scene"
+        continue
+    fi
+    SCENES+=("$scene:$layout")
+done
+
+echo "Found ${#SCENES[@]} scenes to process."
+
+process_scene() {
+    local scene="$1"
+    local layout="$2"
+    local gpu_id="$3"
+    local scene_dir="$DATA_ROOT/$scene"
+    local model_dir="$OUTPUT_ROOT/$scene"
+    local mesh_file="$model_dir/$MESH_PATH_REL"
+    local mask_dir="$scene_dir/mask"
+    local -a render_args
+    local -a mask_args
+
+    export CUDA_VISIBLE_DEVICES="$gpu_id"
+    set_scene_args "$scene_dir" "$layout"
+
+    echo "[GPU $gpu_id] Start scene=$scene layout=$layout"
+
+    if [ "$FORCE" != "1" ] && [ -f "$mesh_file" ]; then
+        echo "[GPU $gpu_id] Mesh exists, skip render: $mesh_file"
+    else
+        render_args=(
+            -s "$SOURCE_PATH"
+            -m "$model_dir"
+            --skip_test
+            --max_depth "$RENDER_MAX_DEPTH"
+            --voxel_size "$VOXEL_SIZE"
+            --num_cluster "$NUM_CLUSTER"
+        )
+        if [ "$USE_DEPTH_FILTER" = "1" ]; then
+            render_args+=(--use_depth_filter)
+        fi
+        render_args+=("${IMAGE_ARG[@]}")
+
+        python PGSR/render.py "${render_args[@]}"
+    fi
+
+    if [ ! -f "$mesh_file" ]; then
+        echo "[GPU $gpu_id] Error: mesh was not generated: $mesh_file" >&2
+        return 1
+    fi
+
+    if [ "$FORCE" != "1" ] && [ -d "$mask_dir" ]; then
+        echo "[GPU $gpu_id] Mask directory exists, skip mesh2mask: $mask_dir"
+        return 0
+    fi
+
+    mask_args=(
+        -m "$model_dir"
+        -s "$SOURCE_PATH"
+        --mesh_path "$MESH_PATH_REL"
+        --max_depth "$MASK_MAX_DEPTH"
+        --voxel_size "$VOXEL_SIZE"
+    )
+    mask_args+=("${IMAGE_ARG[@]}")
+
+    python PGSR/mesh2mask.py "${mask_args[@]}"
+    echo "[GPU $gpu_id] Done scene=$scene"
+}
+
+current_slot=0
+failed=0
+
+for item in "${SCENES[@]}"; do
+    scene="${item%%:*}"
+    layout="${item#*:}"
+
+    while [ "$(jobs -rp | wc -l)" -ge "$MAX_PARALLEL" ]; do
+        if ! wait -n; then
+            failed=$((failed + 1))
         fi
     done
-    
-    # 在后台启动处理任务
-    process_scene "$scene" "$current_gpu" &
-    pid=$!
-    pids+=("$pid")
-    
-    echo "场景 $scene 已分配到 GPU $current_gpu (PID: $pid)"
-    
-    # 更新GPU索引（循环使用0-7）
-    current_gpu=$(( (current_gpu + 1) % MAX_PARALLEL ))
+
+    gpu_id=$((current_slot % NUM_GPUS))
+    process_scene "$scene" "$layout" "$gpu_id" &
+    echo "Launched scene=$scene layout=$layout GPU=$gpu_id PID=$!"
+    current_slot=$((current_slot + 1))
 done
 
-# 等待所有后台任务完成
-echo "等待所有任务完成..."
-for pid in "${pids[@]}"; do
-    wait "$pid"
+while [ "$(jobs -rp | wc -l)" -gt 0 ]; do
+    if ! wait -n; then
+        failed=$((failed + 1))
+    fi
 done
 
-echo "所有场景处理完成！"
+if [ "$failed" -ne 0 ]; then
+    echo "Mesh/mask processing finished with $failed failed job(s)." >&2
+    exit 1
+fi
+
+echo "Mesh/mask processing finished successfully."

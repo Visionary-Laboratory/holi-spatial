@@ -55,6 +55,20 @@ def _setup_tf32() -> None:
 _setup_tf32()
 
 
+def _resolve_bpe_path(bpe_path=None):
+    if bpe_path is not None:
+        return bpe_path
+    local_bpe_path = os.path.join(
+        os.path.dirname(__file__), "..", "assets", "bpe_simple_vocab_16e6.txt.gz"
+    )
+    if os.path.exists(local_bpe_path):
+        return local_bpe_path
+    return hf_hub_download(
+        repo_id="facebook/sam3",
+        filename="bpe_simple_vocab_16e6.txt.gz",
+    )
+
+
 def _create_position_encoding(precompute_resolution=None):
     """Create position encoding for visual backbone."""
     return PositionEmbeddingSine(
@@ -579,10 +593,7 @@ def build_sam3_image_model(
     Returns:
         A SAM3 image model
     """
-    if bpe_path is None:
-        bpe_path = os.path.join(
-            os.path.dirname(__file__), "..", "assets", "bpe_simple_vocab_16e6.txt.gz"
-        )
+    bpe_path = _resolve_bpe_path(bpe_path)
     # Create visual components
     compile_mode = "default" if compile else None
     vision_encoder = _create_vision_backbone(
@@ -667,10 +678,7 @@ def build_sam3_video_model(
     Returns:
         Sam3VideoInferenceWithInstanceInteractivity: The instantiated dense tracking model
     """
-    if bpe_path is None:
-        bpe_path = os.path.join(
-            os.path.dirname(__file__), "..", "assets", "bpe_simple_vocab_16e6.txt.gz"
-        )
+    bpe_path = _resolve_bpe_path(bpe_path)
 
     # Build Tracker module
     tracker = build_tracker(apply_temporal_disambiguation=apply_temporal_disambiguation)

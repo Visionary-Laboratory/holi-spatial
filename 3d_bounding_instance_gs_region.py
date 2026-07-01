@@ -43,7 +43,7 @@ DEFAULT_OUTPUT_DIR = Path("output_3d_bounding/output_3d_bounding_mask_z")
 DEFAULT_GS_MODEL = Path("pgsr_scannet") / DEFAULT_SCENE
 DEFAULT_RERUN = True
 MAX_POINT_COUNT = 5_000_000
-DEFAULT_VLM_MODEL_PATH = "/mnt/shared-storage-user/solution/huggingface/hub/models--Qwen--Qwen3-VL-30B-A3B-Thinking/snapshots/d0ed0380729be07a546fdefafbb4fe411f341e92/"
+DEFAULT_VLM_MODEL_PATH = ""
 DEFAULT_VLLM_API_URL = "http://127.0.0.1:8000/v1/chat/completions"
 
 
@@ -1632,4 +1632,3 @@ if __name__ == "__main__":
 # 2. 除了保存depth_points，还保存eroded mask points及他们的label，以便后续可视化。没有label的点，label赋值为others
 
 # vlm进行判断，消除sam的错误mask
-

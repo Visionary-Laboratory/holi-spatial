@@ -1,14 +1,16 @@
-#!/bin/bash
+#!/usr/bin/env bash
+set -euo pipefail
 
-# 单场景示例（保留作参考）
-# python classic_vllm.py --data-root scannetppv2/data --scene 0a5c013435 --api-base http://10.102.204.50:8000/v1 --output-dir Qwen3VL-32B-Scannetppv2
-# python sam3.py --data-root scannetppv2/data --scene-json Qwen3VL-32B-Scannetppv2/0a5c013435.json --output-dir sam3_masks_scannetppv2_new
-# python 3d_bounding_instance_gs_rerun.py --scene 0a5c013435 --data-root scannetppv2/data --mask-root sam3_masks_scannetppv2_new -m pgsr_scannetppv2_all/0a5c013435/ --output-dir output_scannetppv2_new --vllm-api-url http://10.102.206.33:8001/v1/chat/completions
-
-# ========== 批量处理：所有有 point_cloud.ply 的场景，8 卡每卡 2 场景 = 16 并行 ==========
-
-SCENES_DIR="pgsr_scannetppv2_all"
-OUTPUT_JSON_DIR="output_scannetppv2_region_new"
+DATA_ROOT="${DATA_ROOT:-scannetppv2/data}"
+SCENES_DIR="${SCENES_DIR:-pgsr_scannetppv2_all}"
+CLASS_JSON_DIR="${CLASS_JSON_DIR:-Qwen3VL-32B-Scannetppv2_region}"
+MASK_ROOT="${MASK_ROOT:-sam3_masks_scannetppv2_region}"
+OUTPUT_JSON_DIR="${OUTPUT_JSON_DIR:-output_scannetppv2_region_new}"
+VLLM_API_BASE="${VLLM_API_BASE:-http://localhost:8000/v1}"
+VLLM_CHAT_URL="${VLLM_CHAT_URL:-http://localhost:8000/v1/chat/completions}"
+BBOX_SCRIPT="${BBOX_SCRIPT:-3d_bounding_instance_gs_region.py}"
+MAX_PARALLEL="${MAX_PARALLEL:-16}"
+NUM_GPUS="${NUM_GPUS:-8}"
 PLY_PATH="point_cloud/iteration_30000/point_cloud.ply"
 SCENES=()
 
@@ -34,15 +36,12 @@ process_scene() {
     local slot=$3
     export CUDA_VISIBLE_DEVICES=$gpu_id
     echo "[GPU${gpu_id}-${slot}] 开始: $scene"
-    python classic_region.py --data-root scannetppv2/data --scene "$scene" --api-base http://10.102.204.50:8000/v1 --output-dir Qwen3VL-32B-Scannetppv2_region || { echo "[GPU${gpu_id}-${slot}] $scene classic_vllm 失败"; return 1; }
-    python sam3.py --data-root scannetppv2/data --scene-json "Qwen3VL-32B-Scannetppv2_region/${scene}.json" --output-dir sam3_masks_scannetppv2_region || { echo "[GPU${gpu_id}-${slot}] $scene sam3 失败"; return 1; }
-    python 3d_bounding_instance_gs_region.py --scene "$scene" --data-root scannetppv2/data --mask-root sam3_masks_scannetppv2_region -m "pgsr_scannetppv2_all/${scene}/" --output-dir output_scannetppv2_region_new --vllm-api-url http://10.102.206.33:8001/v1/chat/completions || { echo "[GPU${gpu_id}-${slot}] $scene 3d_bounding 失败"; return 1; }
+    python classic_region.py --data-root "$DATA_ROOT" --scene "$scene" --api-base "$VLLM_API_BASE" --output-dir "$CLASS_JSON_DIR" || { echo "[GPU${gpu_id}-${slot}] $scene classic_region 失败"; return 1; }
+    python sam3.py --data-root "$DATA_ROOT" --scene-json "$CLASS_JSON_DIR/${scene}.json" --output-dir "$MASK_ROOT" || { echo "[GPU${gpu_id}-${slot}] $scene sam3 失败"; return 1; }
+    python "$BBOX_SCRIPT" --scene "$scene" --data-root "$DATA_ROOT" --mask-root "$MASK_ROOT" -m "$SCENES_DIR/${scene}/" --output-dir "$OUTPUT_JSON_DIR" --vllm-api-url "$VLLM_CHAT_URL" --scene-json-dir "$CLASS_JSON_DIR" || { echo "[GPU${gpu_id}-${slot}] $scene 3d_bounding 失败"; return 1; }
     echo "[GPU${gpu_id}-${slot}] 完成: $scene"
 }
 
-# 16 并行，每卡 2 个场景：用全局任务序号 task_index 分配 GPU，保证轮询 0~7
-MAX_PARALLEL=16
-NUM_GPUS=8
 pids=()
 task_index=0
 
