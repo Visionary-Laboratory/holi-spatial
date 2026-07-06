@@ -16,10 +16,10 @@
 
 ## Todo List
 
-- We release the project page of Holi-Spatial, check on [here](https://visionary-laboratory.github.io/holi-spatial/).
-- We have released a subset of the [Holi-Spatial dataset](https://huggingface.co/Holi-Spatial), featuring **2,000+ high-quality Gaussian models**, each accompanied by its corresponding **mesh** and **scene-level 3D bounding box annotations**, together with **HoliSpatial-QA-2M**, a **2-million-scale QA dataset** built upon part of these richly annotated 3D assets.
-- We release all model checkpoints.
-- We will release the pipeline code in July.
+- [x] We release the project page of Holi-Spatial, check on [here](https://visionary-laboratory.github.io/holi-spatial/).
+- [x] We have released a subset of the [Holi-Spatial dataset](https://huggingface.co/Holi-Spatial), featuring **2,000+ high-quality Gaussian models**, each accompanied by its corresponding **mesh** and **scene-level 3D bounding box annotations**, together with **HoliSpatial-QA-2M**, a **2-million-scale QA dataset** built upon part of these richly annotated 3D assets.
+- [x] We release all model checkpoints.
+- [x] We will release the pipeline code in July.
 
 # Holi-Spatial Pipeline
 
