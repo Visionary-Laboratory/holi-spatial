@@ -274,3 +274,21 @@ The final output contains `dataset.jsonl` and copied/rendered images in the form
 - All large datasets, model checkpoints, masks, QA outputs, and 3DGS outputs are ignored by `.gitignore`.
 - The batch scripts skip scenes whose final output JSON or trained point cloud already exists.
 - For single-scene debugging, call the Python scripts directly with `--scene`, `--data-root`, `--scene-json`, `--mask-root`, and `--model-path`.
+
+## Acknowledgements
+
+This pipeline builds on and benefits from several open research works and foundation models:
+
+- [SAM3](https://github.com/facebookresearch/sam3)
+- [Depth Anything 3](https://github.com/ByteDance-Seed/depth-anything-3)
+- [PGSR](https://github.com/zju3dv/PGSR)
+- [Qwen3-VL](https://github.com/qwenlm/qwen3-vl)
+- [Gemini 3 Flash](https://deepmind.google/models/gemini/flash/)
+
+We also thank the dataset providers:
+
+- [ScanNet++](https://github.com/scannetpp/scannetpp)
+- [ScanNet](http://www.scan-net.org/)
+- [DL3DV-10K](https://dl3dv-10k.github.io/DL3DV-10K/)
+
+We thank the authors and maintainers of these projects for making their work available to the community.
