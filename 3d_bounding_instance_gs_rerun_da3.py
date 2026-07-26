@@ -4,24 +4,23 @@ import argparse
 import json
 import logging
 import sys
+import time
 from collections import defaultdict, deque
+from io import BytesIO
 from pathlib import Path
-from typing import Dict, List, Tuple, Optional, Literal
+from typing import Any, Dict, List, Tuple, Optional, Literal
 import os
 import numpy as np
 import numpy.typing as npt
 import torch
 import cv2
 from PIL import Image
+from pydantic import BaseModel
 from skimage import morphology
 from tqdm import tqdm
 import trimesh
 from scipy.spatial.transform import Rotation as R
 import pycocotools.mask as mask_utils
-# transformers 导入已移除，改用 vLLM 服务
-import base64
-import io
-import requests
 
 from sam3.agent.helpers.visualizer import Visualizer
 from sam3.agent.helpers.zoom_in import render_zoom_in
@@ -45,6 +44,19 @@ DEFAULT_RERUN = True
 MAX_POINT_COUNT = 5_000_000
 DEFAULT_VLM_MODEL_PATH = ""
 DEFAULT_VLLM_API_URL = "http://127.0.0.1:8000/v1/chat/completions"
+DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
+DEFAULT_API_KEY_ENV = "VERTEX_API_KEY"
+INSTANCE_MERGE_OVERLAP_THRESHOLD = 0.30
+STRUCTURAL_LABELS = {"floor", "wall", "ceiling"}
+
+
+class GeminiVerification(BaseModel):
+    decision: Literal["ACCEPT", "REJECT"]
+    predicted_label: str
+    category_matches: bool
+    complete_object: bool
+    single_object_mask: bool
+    reason: str
 
 
 def label_color(label: str) -> np.ndarray:
@@ -70,149 +82,106 @@ def setup_logger(log_path: Optional[Path] = None) -> None:
     )
 
 
-def load_vlm_model(api_url: str = DEFAULT_VLLM_API_URL):
-    """初始化 vLLM 服务客户端。
-    
-    Args:
-        api_url: vLLM 服务的 API 地址，默认为 DEFAULT_VLLM_API_URL
-    
-    Returns:
-        api_url: 返回 API URL 字符串（保持接口兼容性）
-    """
-    logging.info("使用 vLLM 服务: %s", api_url)
-    # 测试连接（可选，不阻塞）
+def load_vlm_model(model: str, api_key_env: str) -> Any:
+    """初始化 Vertex AI Gemini 客户端。"""
+    api_key = os.environ.get(api_key_env) or os.environ.get("GOOGLE_API_KEY")
+    if not api_key:
+        raise RuntimeError(
+            f"Missing Vertex AI API key. Set {api_key_env} (or GOOGLE_API_KEY) in the environment."
+        )
     try:
-        health_url = api_url.replace("/v1/chat/completions", "/health")
-        response = requests.get(health_url, timeout=5)
-        if response.status_code == 200:
-            logging.info("vLLM 服务健康检查通过")
-        else:
-            logging.warning("vLLM 服务健康检查返回状态码: %d", response.status_code)
-    except requests.exceptions.RequestException:
-        # 健康检查失败不影响后续使用，实际调用时会再次尝试
-        logging.info("vLLM 服务健康检查跳过（服务可能未启动或地址不同）")
-    except Exception as e:
-        logging.debug("vLLM 健康检查异常: %s", e)
-    return api_url
+        from google import genai
+    except ImportError as exc:
+        raise RuntimeError(
+            "google-genai is required. Install it with: pip install google-genai"
+        ) from exc
 
-
-def image_to_base64(image: Image.Image) -> str:
-    """将 PIL Image 转换为 base64 编码的字符串。"""
-    buffered = io.BytesIO()
-    image.convert("RGB").save(buffered, format="JPEG")
-    img_str = base64.b64encode(buffered.getvalue()).decode("utf-8")
-    return img_str
+    logging.info(
+        "使用 Vertex AI Gemini 复核中等置信度实例（模型: %s，API key 来自环境变量 %s）",
+        model,
+        api_key_env,
+    )
+    return genai.Client(vertexai=True, api_key=api_key)
 
 
 def verify_label_with_vlm(
-    api_url: str,
+    client: Any,
+    model: str,
     raw_image: Image.Image,
     overlay_image: Image.Image,
     zoomed_image: Image.Image,
     category: str,
+    max_retries: int = 4,
 ) -> bool:
-    """使用 vLLM 服务验证标签是否正确。"""
+    """使用 Gemini 验证 mask 是否对应类别正确的完整单个物体。"""
     prompt = (
-        "You are a visual label verifier for a single masked object.\n"
-        "You will be given three images: (1) the original image, (2) an overlay image where the target object is highlighted with a colored mask, and (3) a zoomed-in pair showing the original object and the highlighted object.\n"
-        f'The user-provided label/category to verify is: "{category}".\n\n'
-
-        "Task:\n"
-        "Decide whether the given label correctly describes the object indicated by the HIGHLIGHTED region.\n"
-        "If it is correct, ACCEPT. If it is incorrect (wrong category), REJECT and provide the correct label you believe fits best.\n\n"
-
-        "Guidelines (consistency-and-rewrite mindset):\n"
-        "1) Focus ONLY on the object covered by the HIGHLIGHTED region. Ignore other objects outside the mask.\n"
-        "2) Identify the core visible noun/object class of the masked object (the best label).\n"
-        "3) Treat extra modifiers in the label (color/material/size/position/relations) as constraints ONLY if they are clearly visible.\n"
-        "   If modifiers are wrong or unverifiable but the core object class is correct, still ACCEPT.\n"
-        "4) If the mask covers only a part of an object but the object class is still clear, judge by the most likely full object.\n"
-        "5) If the masked region is ambiguous, too small, or does not correspond to a recognizable object, REJECT and set predicted_label to \"unknown\".\n"
-        "6) Use common-sense synonyms/hypernyms: accept reasonable equivalents (e.g., \"sofa\" vs \"couch\").\n"
-        "   If the label is too specific and not verifiable (e.g., exact brand/model/species), prefer a more general correct label.\n\n"
-
-        "Output format (VERY IMPORTANT):\n"
-        "Return ONLY a JSON object on a single line with these keys:\n"
-        "  - decision: \"ACCEPT\" or \"REJECT\"\n"
-        "  - predicted_label: a short English noun phrase for the masked object class (e.g., \"chair\", \"person\", \"car\").\n"
-        "Rules:\n"
-        "  - If decision is ACCEPT, predicted_label should be exactly the provided label (category) or its closest normalized form.\n"
-        "  - If decision is REJECT, predicted_label must be your best guess of the correct label, or \"unknown\" if unclear.\n"
-        "Do not output any extra text after the JSON object. The JSON should be the final part of your response."
+        "You are a strict quality verifier for one proposed object segmentation mask. "
+        "The following three images are, in order: (1) the raw scene image, (2) the same image with the target mask "
+        "highlighted, and (3) a zoomed view of that target.\n\n"
+        f'The proposed base-class label is "{category}".\n\n'
+        "ACCEPT only when every condition below is true:\n"
+        "- The highlighted pixels primarily cover exactly one recognizable physical object.\n"
+        "- The proposed label is the correct base class (reasonable synonyms such as sofa/couch are equivalent).\n"
+        "- The mask represents the complete visible object instance, including its full visible silhouette.\n"
+        "- It is not merely a component, corner, edge, leg, handle, surface patch, or other fragment of a larger object.\n"
+        "- It does not substantially combine multiple objects or leak into unrelated background.\n\n"
+        "REJECT when the region is ambiguous, tiny, fragmented, is only part of an object even if the full class can be "
+        "inferred, uses the wrong category, or merges multiple instances. Be conservative: precision matters more than recall. "
+        "predicted_label must be a short lowercase English base-class noun, or 'unknown' when unclear. "
+        "Return only the requested structured JSON. Keep reason to one short sentence."
     )
 
-    try:
-        # 将图像转换为 base64
-        raw_img_b64 = image_to_base64(raw_image)
-        overlay_img_b64 = image_to_base64(overlay_image)
-        zoomed_img_b64 = image_to_base64(zoomed_image)
+    from google.genai import types
 
-        # 构建符合 OpenAI 格式的消息（vLLM 兼容）
-        messages = [
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "image_url",
-                        "image_url": {"url": f"data:image/jpeg;base64,{raw_img_b64}"}
-                    },
-                    {
-                        "type": "image_url",
-                        "image_url": {"url": f"data:image/jpeg;base64,{overlay_img_b64}"}
-                    },
-                    {
-                        "type": "image_url",
-                        "image_url": {"url": f"data:image/jpeg;base64,{zoomed_img_b64}"}
-                    },
-                    {
-                        "type": "text",
-                        "text": prompt
-                    }
-                ]
-            }
-        ]
+    image_parts = []
+    for image in (raw_image, overlay_image, zoomed_image):
+        buffer = BytesIO()
+        image.convert("RGB").save(buffer, format="JPEG", quality=95)
+        image_parts.append(types.Part.from_bytes(data=buffer.getvalue(), mime_type="image/jpeg"))
 
-        # 发送请求到 vLLM 服务
-        payload = {
-            "model": "",  # vLLM 不需要指定模型名称，会自动使用已加载的模型
-            "messages": messages,
-            "max_tokens": 2048,
-            "temperature": 0.0,  # 使用确定性输出
-        }
+    for attempt in range(1, max_retries + 1):
+        try:
+            response = client.models.generate_content(
+                model=model,
+                contents=types.Content(
+                    role="user",
+                    parts=[types.Part.from_text(text=prompt), *image_parts],
+                ),
+                config=types.GenerateContentConfig(
+                    temperature=0.0,
+                    max_output_tokens=1024,
+                    thinking_config=types.ThinkingConfig(thinking_budget=0),
+                    response_mime_type="application/json",
+                    response_schema=GeminiVerification,
+                ),
+            )
+            parsed = response.parsed
+            if parsed is None:
+                parsed = GeminiVerification.model_validate_json(response.text or "{}")
+            elif not isinstance(parsed, GeminiVerification):
+                parsed = GeminiVerification.model_validate(parsed)
 
-        response = requests.post(api_url, json=payload, timeout=120)
-        response.raise_for_status()
-
-        result = response.json()
-        if "choices" not in result or len(result["choices"]) == 0:
-            logging.warning("vLLM 返回结果格式异常: %s", result)
-            return False
-        
-        output_text = result["choices"][0]["message"]["content"]
-
-        # 尝试从输出中提取 JSON
-        import json
-        import re
-        
-        # 寻找 JSON 块：匹配最外层的 {}
-        json_match = re.search(r'\{.*\}', output_text, re.DOTALL)
-        if json_match:
-            json_str = json_match.group(0)
-            try:
-                data = json.loads(json_str)
-                decision = data.get("decision", "REJECT")
-                logging.info("vLLM 验证结果 [%s]: %s -> %s", category, decision, data.get("predicted_label", ""))
-                return decision == "ACCEPT"
-            except json.JSONDecodeError:
-                logging.warning("vLLM 返回了无效的 JSON 字符串: %s", json_str)
-        else:
-            logging.warning("vLLM 未能输出 JSON 格式结果，输出预览: %s...", output_text[:200])
-    except requests.exceptions.RequestException as e:
-        logging.warning("vLLM API 请求失败: %s", e)
-    except Exception as e:
-        logging.warning("vLLM 验证过程出错: %s", e)
-        import traceback
-        traceback.print_exc()
+            accepted = bool(
+                parsed.decision == "ACCEPT"
+                and parsed.category_matches
+                and parsed.complete_object
+                and parsed.single_object_mask
+            )
+            logging.info(
+                "Gemini 复核 [%s]: %s -> %s（%s）",
+                category,
+                "ACCEPT" if accepted else "REJECT",
+                parsed.predicted_label,
+                parsed.reason,
+            )
+            return accepted
+        except Exception as exc:  # pylint: disable=broad-except
+            if attempt >= max_retries:
+                logging.warning("Gemini 复核失败（已重试 %d 次）: %s", attempt, exc)
+                break
+            delay = min(2 ** (attempt - 1), 16)
+            logging.warning("Gemini 复核失败，第 %d/%d 次，%ds 后重试", attempt, max_retries, delay)
+            time.sleep(delay)
 
     return False
 
@@ -340,7 +309,68 @@ def load_transforms(scene_dir: Path, image_names: Optional[set[str]] = None) -> 
             
         logging.info("加载位姿完成，数量: %d", len(intr_map))
         return intr_map, c2w_map, scene_type, size_map, path_map, mask_map
-    # scannet
+    # 原生 ScanNet v2：pose/*.txt + intrinsic/intrinsic_color.txt
+    elif (
+        (scene_dir / "pose").exists()
+        and (scene_dir / "intrinsic" / "intrinsic_color.txt").exists()
+        and (scene_dir / "color").exists()
+    ):
+        scene_type = "scannet"
+        pose_dir = scene_dir / "pose"
+        rgb_dir = scene_dir / "color"
+        mask_dir = scene_dir / "mask"
+
+        intrinsic = np.loadtxt(
+            scene_dir / "intrinsic" / "intrinsic_color.txt",
+            dtype=np.float32,
+        )
+        if intrinsic.shape not in ((3, 3), (4, 4)):
+            raise ValueError(f"Unexpected ScanNet intrinsic shape: {intrinsic.shape}")
+        K = intrinsic[:3, :3].copy()
+
+        intr_map: Dict[str, np.ndarray] = {}
+        c2w_map: Dict[str, np.ndarray] = {}
+        size_map: Dict[str, Tuple[int, int]] = {}
+        path_map: Dict[str, str] = {}
+        mask_map: Dict[str, np.ndarray] = {}
+
+        image_paths = sorted(
+            p for p in rgb_dir.iterdir() if p.suffix.lower() in {".jpg", ".jpeg", ".png"}
+        )
+        for img_path in tqdm(image_paths, desc="Loading ScanNet cameras"):
+            stem = img_path.stem
+            if image_names is not None and stem not in image_names:
+                continue
+            pose_path = pose_dir / f"{stem}.txt"
+            if not pose_path.exists():
+                logging.warning("ScanNet pose 不存在，跳过: %s", pose_path)
+                continue
+            c2w = np.loadtxt(pose_path, dtype=np.float32)
+            if c2w.shape != (4, 4) or not np.all(np.isfinite(c2w)):
+                logging.warning("ScanNet pose 无效，跳过: %s", pose_path)
+                continue
+
+            with Image.open(img_path) as img:
+                img_w, img_h = img.size
+            intr_map[stem] = K.copy()
+            c2w_map[stem] = c2w
+            size_map[stem] = (img_w, img_h)
+            path_map[stem] = str(img_path)
+
+            mask_path = mask_dir / f"{stem}.png"
+            if mask_path.exists():
+                scene_mask = load_mask(mask_path)
+                if scene_mask.shape != (img_h, img_w):
+                    mask_img = Image.fromarray(scene_mask.astype(np.uint8) * 255)
+                    mask_img = mask_img.resize((img_w, img_h), resample=Image.NEAREST)
+                    scene_mask = np.array(mask_img) > 0
+                mask_map[stem] = scene_mask
+            else:
+                mask_map[stem] = np.ones((img_h, img_w), dtype=bool)
+
+        logging.info("加载原生 ScanNet 位姿完成，数量: %d", len(intr_map))
+        return intr_map, c2w_map, scene_type, size_map, path_map, mask_map
+    # 旧 ScanNet 预处理格式：cam/*.npz
     elif (scene_dir/"cam").exists() and (scene_dir/"color").exists():
         scene_type = "scannet"
         cam_dir = scene_dir / "cam"
@@ -590,6 +620,125 @@ def obb_overlap(
     return vol_inter / min_vol >= intersect_ratio
 
 
+def obb_overlap_ratio(
+    transform_a: np.ndarray,
+    extents_a: np.ndarray,
+    transform_b: np.ndarray,
+    extents_b: np.ndarray,
+) -> float:
+    """Return intersection volume divided by the smaller OBB volume."""
+    obb_a = trimesh.creation.box(extents=extents_a, transform=transform_a)
+    obb_b = trimesh.creation.box(extents=extents_b, transform=transform_b)
+    inter = obb_a.intersection(obb_b)
+    vol_inter = inter.volume if inter.is_volume else 0.0
+    if vol_inter <= 0:
+        return 0.0
+    min_vol = max(1e-9, min(float(np.prod(extents_a)), float(np.prod(extents_b))))
+    return float(vol_inter / min_vol)
+
+
+def merge_instance_tracks(
+    instance_a: Dict[str, Any],
+    instance_b: Dict[str, Any],
+    instance_max_points: int,
+) -> Dict[str, Any]:
+    """Merge two tracks and recompute their OBB from all accumulated observations."""
+    merged = dict(instance_a)
+    merged["points"] = [
+        *instance_a.get("points", []),
+        *instance_b.get("points", []),
+    ]
+    merged["images"] = set(instance_a.get("images", set())) | set(
+        instance_b.get("images", set())
+    )
+    merged["mask_encodings"] = {
+        **instance_a.get("mask_encodings", {}),
+        **instance_b.get("mask_encodings", {}),
+    }
+
+    all_points = np.concatenate(merged["points"], axis=0)
+    if instance_max_points > 0 and all_points.shape[0] > instance_max_points:
+        # OBB orientation is sensitive for very thin mesh surfaces. A random
+        # subset made identical runs produce different overlap graphs, so use
+        # a stable, evenly distributed subset of the accumulated observations.
+        sampled_indices = np.linspace(
+            0,
+            all_points.shape[0] - 1,
+            num=instance_max_points,
+            dtype=np.int64,
+        )
+        all_points = all_points[sampled_indices]
+    merged["obb_transform"], merged["obb_extents"] = compute_obb(all_points)
+    return merged
+
+
+def iterative_merge_instance_tracks(
+    instances: List[Dict[str, Any]],
+    instance_max_points: int,
+    overlap_threshold: float = INSTANCE_MERGE_OVERLAP_THRESHOLD,
+) -> List[Dict[str, Any]]:
+    """Iteratively merge the strongest 3D-overlapping pair until convergence.
+
+    Fusion deliberately ignores SAM instance IDs, source-frame relationships,
+    and 2D mask overlap. After every merge the OBB is recomputed, allowing the
+    overlap graph to evolve until no pair reaches the requested 3D coverage.
+    """
+    if not 0.0 < overlap_threshold <= 1.0:
+        raise ValueError("overlap_threshold must be in (0, 1]")
+
+    merged_instances = list(instances)
+    merge_count = 0
+
+    while len(merged_instances) > 1:
+        best_pair: Optional[Tuple[int, int]] = None
+        best_overlap = -1.0
+
+        for idx_a in range(len(merged_instances) - 1):
+            for idx_b in range(idx_a + 1, len(merged_instances)):
+                instance_a = merged_instances[idx_a]
+                instance_b = merged_instances[idx_b]
+                overlap_ratio = obb_overlap_ratio(
+                    instance_a["obb_transform"],
+                    instance_a["obb_extents"],
+                    instance_b["obb_transform"],
+                    instance_b["obb_extents"],
+                )
+                if overlap_ratio < overlap_threshold:
+                    continue
+                if overlap_ratio > best_overlap:
+                    best_overlap = overlap_ratio
+                    best_pair = (idx_a, idx_b)
+
+        if best_pair is None:
+            break
+
+        idx_a, idx_b = best_pair
+        merged_track = merge_instance_tracks(
+            merged_instances[idx_a],
+            merged_instances[idx_b],
+            instance_max_points,
+        )
+        logging.info(
+            "二次融合第 %d 轮: overlap=%.3f, observations=%d+%d -> %d",
+            merge_count + 1,
+            best_overlap,
+            len(merged_instances[idx_a].get("images", set())),
+            len(merged_instances[idx_b].get("images", set())),
+            len(merged_track.get("images", set())),
+        )
+        merged_instances[idx_a] = merged_track
+        del merged_instances[idx_b]
+        merge_count += 1
+
+    logging.info(
+        "迭代式二次融合完成: %d -> %d 个实例（共融合 %d 次）",
+        len(instances),
+        len(merged_instances),
+        merge_count,
+    )
+    return merged_instances
+
+
 def obb_contains(
     transform_a: np.ndarray,
     extents_a: np.ndarray,
@@ -728,6 +877,8 @@ def load_da3_depths(
     """
     if scene_type == "scannetppv2":
         rgb_dir = scene_dir / "dslr" / "resized_undistorted_images"
+    elif scene_type == "scannet":
+        rgb_dir = scene_dir / "color"
     else:
         rgb_dir = scene_dir / "dense" / "rgb"
     depth_dir = scene_dir / "depth_da3"
@@ -860,6 +1011,103 @@ def render_depths_with_gaussians(
     return depth_map, color_map
 
 
+def render_depths_with_mesh(
+    mesh_path: Path,
+    intr_map: Dict[str, np.ndarray],
+    c2w_map: Dict[str, np.ndarray],
+    size_map: Dict[str, Tuple[int, int]],
+    path_map: Dict[str, str],
+    image_names: Optional[set[str]] = None,
+    depth_crop_border: int = 32,
+) -> Tuple[Dict[str, np.ndarray], Dict[str, np.ndarray]]:
+    """使用仓库 Mesh2DepthHelper/nvdiffrast 将 TSDF mesh 渲染为线性 z-depth。"""
+    if not mesh_path.exists():
+        raise FileNotFoundError(f"Mesh not found: {mesh_path}")
+    if depth_crop_border < 0:
+        raise ValueError("depth_crop_border must be >= 0")
+
+    from Mesh2DepthHelper import (  # noqa: E402
+        Build_Ply_Render_Camera_Parameters_colmap_correct,
+        DepthRenderer,
+        Load_ply_resource,
+    )
+
+    logging.info("加载 mesh 用于深度渲染: %s", mesh_path)
+    device = "cuda"
+    mesh_resource = Load_ply_resource(str(mesh_path), device=device)
+    renderer = DepthRenderer(device=device)
+
+    if image_names is not None:
+        target_stems = {Path(name).stem for name in image_names}
+        stems_to_render = [s for s in target_stems if s in c2w_map]
+    else:
+        stems_to_render = list(c2w_map.keys())
+
+    logging.info(
+        "准备渲染 mesh 深度，相机数: %d，边缘 crop: %d px",
+        len(stems_to_render),
+        depth_crop_border,
+    )
+    depth_map: Dict[str, np.ndarray] = {}
+    color_map: Dict[str, np.ndarray] = {}
+
+    for stem in tqdm(stems_to_render, desc="Rendering mesh depths"):
+        c2w = c2w_map[stem]
+        K = intr_map[stem]
+        width, height = size_map[stem]
+        if depth_crop_border > 0 and (
+            height <= 2 * depth_crop_border or width <= 2 * depth_crop_border
+        ):
+            raise ValueError(
+                f"depth_crop_border={depth_crop_border} is too large for {width}x{height}"
+            )
+
+        r_c2w = c2w[:3, :3]
+        t_c2w = c2w[:3, 3]
+        r_w2c = r_c2w.T
+        t_w2c = -r_w2c @ t_c2w
+        camera_parameters = Build_Ply_Render_Camera_Parameters_colmap_correct(
+            float(K[0, 0]),
+            float(K[1, 1]),
+            float(K[0, 2]),
+            float(K[1, 2]),
+            width,
+            height,
+            0.01,
+            100.0,
+            r_w2c,
+            t_w2c,
+            device,
+        )
+        depth_tensor, hit_mask = renderer.render_depth_batched(
+            mesh=mesh_resource,
+            camera_parameters=camera_parameters,
+            max_tris_per_pass=1_000_000,
+            flip_y=True,
+            linear_depth=True,
+            verbose=False,
+        )
+        depth = depth_tensor.detach().cpu().numpy().astype(np.float32)
+        hits = hit_mask.detach().cpu().numpy().astype(bool)
+        depth[~hits | ~np.isfinite(depth)] = 0.0
+        if depth_crop_border > 0:
+            border = depth_crop_border
+            depth[:border, :] = 0.0
+            depth[-border:, :] = 0.0
+            depth[:, :border] = 0.0
+            depth[:, -border:] = 0.0
+        depth_map[stem] = depth
+
+        image_path = Path(path_map[stem])
+        if image_path.suffix.lower() in {".png", ".jpg", ".jpeg"} and image_path.exists():
+            color_map[stem] = np.array(Image.open(image_path).convert("RGB"), dtype=np.uint8)
+        else:
+            color_map[stem] = None
+
+    logging.info("mesh 深度渲染完成，数量: %d", len(depth_map))
+    return depth_map, color_map
+
+
 def export_pointcloud_and_bboxes(
     points: np.ndarray,
     bboxes: List[Dict],
@@ -868,8 +1116,6 @@ def export_pointcloud_and_bboxes(
     colors: Optional[np.ndarray] = None,
     include_labels: Optional[set[str]] = None,
 ) -> Path | None:
-    if include_labels is None:
-        return None
     try:
         import trimesh
     except ImportError:
@@ -1048,11 +1294,16 @@ def process_scene(
     erode_pixels: int,
     instance_max_points: int,
     include_labels: Optional[set[str]],
+    process_labels: Optional[set[str]],
     rerun_enabled: bool,
     rerun_addr: Optional[str],
     rerun_save_path: Optional[Path],
     cam_max_size: int,
-    vllm_api_url: str = DEFAULT_VLLM_API_URL,
+    gemini_model: str = DEFAULT_GEMINI_MODEL,
+    api_key_env: str = DEFAULT_API_KEY_ENV,
+    depth_source: str = "mesh",
+    mesh_path: Optional[Path] = None,
+    mesh_depth_crop_border: int = 32,
 ) -> Path:
     scene_dir = data_root / scene
     
@@ -1072,8 +1323,13 @@ def process_scene(
     intr_map, c2w_map, scene_type, size_map, path_map, mask_map = load_transforms(scene_dir, image_names=image_names)
     print('scene_type:', scene_type)
 
-    # 对于 DL3DV 和 scannetppv2 场景，使用 da3 深度；其他场景使用高斯渲染
-    if scene_type in ("dl3dv", "scannetppv2"):
+    resolved_depth_source = depth_source
+    if resolved_depth_source == "auto":
+        # 按原始 pipeline：DL3DV/ScanNet++ 用 DA3，ScanNet v2 用 PGSR/GS。
+        resolved_depth_source = "da3" if scene_type in ("dl3dv", "scannetppv2") else "gs"
+    logging.info("当前 3D bbox 深度源: %s", resolved_depth_source)
+
+    if resolved_depth_source == "da3":
         depth_map, color_map = load_da3_depths(
             scene_dir,
             intr_map=intr_map, c2w_map=c2w_map,
@@ -1082,13 +1338,35 @@ def process_scene(
             scene_type=scene_type,
             scene_id=scene,
         )
-    else:
+    elif resolved_depth_source == "gs":
         depth_map, color_map = render_depths_with_gaussians(
             model_path, iteration, 
             intr_map=intr_map, c2w_map=c2w_map, 
             size_map=size_map, path_map=path_map,
             image_names=image_names
         )
+    elif resolved_depth_source == "mesh":
+        resolved_mesh_path = mesh_path or (model_path / "mesh" / "tsdf_fusion_post.ply")
+        depth_map, color_map = render_depths_with_mesh(
+            resolved_mesh_path,
+            intr_map=intr_map,
+            c2w_map=c2w_map,
+            size_map=size_map,
+            path_map=path_map,
+            image_names=image_names,
+            depth_crop_border=mesh_depth_crop_border,
+        )
+    else:
+        raise ValueError(f"Unsupported depth source: {resolved_depth_source}")
+
+    # mesh.sh / PGSR/mesh2mask.py generates scene masks by retaining pixels
+    # whose PGSR plane depth agrees with the rendered mesh depth.  In mesh
+    # lifting mode, apply those masks as a visibility filter so rays passing
+    # through missing/thin mesh geometry do not lift the background surface
+    # into the object's point cloud.
+    use_mesh_gs_depth_filter = resolved_depth_source == "mesh"
+    if use_mesh_gs_depth_filter:
+        logging.info("mesh 反投影启用 GS/mesh 深度一致性 mask 过滤")
 
     # 读取 mask_index.json（所有场景都需要，包括 DL3DV）
     mask_index_path = mask_root / scene / "mask_index.json"
@@ -1104,8 +1382,9 @@ def process_scene(
             mask_score_map[path] = float(score)
             mask_to_item[path] = it
 
-    # 初始化 vLLM 服务客户端
-    vlm_api_url = load_vlm_model(vllm_api_url)
+    # Gemini 客户端按需初始化。结构面（floor/wall/ceiling）不适合用
+    # “完整单个物体”条件复核；按标签恢复结构面时也不应要求 API key。
+    vlm_client = None
 
     results: List[Dict] = []
     inst_counter = 1
@@ -1132,6 +1411,8 @@ def process_scene(
         label_groups[item["label"]].append(item)
 
     for label, label_items in label_groups.items():
+        if process_labels is not None and label not in process_labels:
+            continue
         logging.info("处理标签 %s，共 %d 个 mask", label, len(label_items))
         instances: List[Dict] = []
         if len(label_items) > 1000:
@@ -1167,15 +1448,16 @@ def process_scene(
                 mask = load_mask(mask_path)
             
             mask = erode_mask(mask, erode_pixels)
-            # 与 image mask 求与，被 mask 的部分不要投射
-            # if stem in mask_map:
-            #     image_mask = mask_map[stem]
-            #     # 调整 image_mask 尺寸以匹配 instance mask
-            #     if image_mask.shape != mask.shape:
-            #         mask_img = Image.fromarray(image_mask.astype(np.uint8) * 255)
-            #         mask_resized = mask_img.resize((mask.shape[1], mask.shape[0]), resample=Image.NEAREST)
-            #         image_mask = (np.array(mask_resized) > 0).astype(bool)
-            #     mask = mask & image_mask
+            if use_mesh_gs_depth_filter and stem in mask_map:
+                image_mask = mask_map[stem]
+                if image_mask.shape != mask.shape:
+                    mask_img = Image.fromarray(image_mask.astype(np.uint8) * 255)
+                    mask_resized = mask_img.resize(
+                        (mask.shape[1], mask.shape[0]),
+                        resample=Image.NEAREST,
+                    )
+                    image_mask = np.array(mask_resized) > 0
+                mask = mask & image_mask
                 
             
             
@@ -1196,11 +1478,8 @@ def process_scene(
                 "mask_encodings": {str(mask_path): mask_encoding},
             }
 
-            # 判断是否与已有实例合并
-            def share_same_frame(img_a: str, img_b: str) -> bool:
-                return Path(img_a).parent.name == Path(img_b).parent.name
-
-            merge_indices = []
+            # 仅按 3D OBB 覆盖率与已有实例合并，不参考 SAM 实例或帧关系。
+            merge_candidates: List[Tuple[float, int]] = []
             indices_to_check = range(len(instances))
             if len(instances) > 1000:
                 # 实例过多时均匀抽取 500 个进行重叠检查以加速
@@ -1209,52 +1488,24 @@ def process_scene(
 
             for idx in indices_to_check:
                 inst = instances[idx]
-                overlap = obb_overlap(
+                overlap_ratio = obb_overlap_ratio(
                     inst["obb_transform"],
                     inst["obb_extents"],
                     transform,
                     extents,
                 )
-                # 检查新 mask 是否与该实例冲突
-                # conflict_with_new = any(
-                #     share_same_frame(img, next(iter(new_inst["images"])))
-                #     for img in inst["images"]
-                # )
-                
-                # if overlap and not conflict_with_new:
-                #     # 还需要检查：如果要合并这个实例，会不会导致 merge_indices 里的实例互相冲突？
-                #     can_merge_with_others = True
-                #     for already_selected_idx in merge_indices:
-                #         if any(share_same_frame(img1, img2) 
-                #                for img1 in instances[already_selected_idx]["images"] 
-                #                for img2 in inst["images"]):
-                #             can_merge_with_others = False
-                #             break
-                    
-                if overlap:
-                    merge_indices.append(idx)
+                if overlap_ratio >= INSTANCE_MERGE_OVERLAP_THRESHOLD:
+                    merge_candidates.append((overlap_ratio, idx))
 
-            if not merge_indices:
+            if not merge_candidates:
                 instances.append(new_inst)
             else:
-                merged = new_inst
-                for idx in sorted(merge_indices, reverse=True):
-                    inst = instances.pop(idx)
-                    merged["points"].extend(inst["points"])
-                    merged["images"] |= inst["images"]
-                    # 合并 mask 编码
-                    if "mask_encodings" not in merged:
-                        merged["mask_encodings"] = {}
-                    if "mask_encodings" in inst:
-                        merged["mask_encodings"].update(inst["mask_encodings"])
-                # 重新计算合并后的 OBB
-                all_pts = np.concatenate(merged["points"], axis=0)
-                if instance_max_points > 0 and all_pts.shape[0] > instance_max_points:
-                    orig_n = all_pts.shape[0]
-                    idx = np.random.choice(orig_n, instance_max_points, replace=False)
-                    all_pts = all_pts[idx]
-                    # logging.info("实例合并点云下采样: %d -> %d", orig_n, all_pts.shape[0])
-                merged["obb_transform"], merged["obb_extents"] = compute_obb(all_pts)
+                # A new observation may overlap several nearby tracks. Merge
+                # it only into the best match instead of bridging multiple
+                # real instances into one large box.
+                _, merge_idx = max(merge_candidates, key=lambda candidate: candidate[0])
+                inst = instances.pop(merge_idx)
+                merged = merge_instance_tracks(new_inst, inst, instance_max_points)
                 instances.append(merged)
 
         logging.info("标签 %s 初步合并得到 %d 个实例", label, len(instances))
@@ -1270,6 +1521,12 @@ def process_scene(
             
             # 只验证最高score在0.75和0.9之间的
             if max_score < 0.75:
+                continue
+
+            # floor/wall/ceiling 是延展结构面，不存在适用于普通物体的
+            # “完整可见轮廓”；通过置信度门槛后直接保留。
+            if label in STRUCTURAL_LABELS:
+                qualified_instances.append(inst)
                 continue
 
             # 否则，取分数最高的 mask 进行 VLM 验证
@@ -1341,46 +1598,37 @@ def process_scene(
                 )
                 overlay_image = Image.fromarray(viz.output.get_image())
                 
-                if verify_label_with_vlm(vlm_api_url, raw_image, overlay_image, zoomed_image, label):
-                    logging.info("VLM 召回了低分实例 (label: %s, highest_score: %.2f, image: %s)", 
+                if vlm_client is None:
+                    vlm_client = load_vlm_model(gemini_model, api_key_env)
+
+                if verify_label_with_vlm(
+                    vlm_client,
+                    gemini_model,
+                    raw_image,
+                    overlay_image,
+                    zoomed_image,
+                    label,
+                ):
+                    logging.info("Gemini 召回了中等置信度实例 (label: %s, highest_score: %.2f, image: %s)",
                                  label, mask_score_map.get(highest_conf_mask_path, 0.0), raw_image_path)
                     qualified_instances.append(inst)
             except Exception as e:
-                logging.error("VLM 验证过程出错: %s", e)
+                logging.error("Gemini 复核过程出错: %s", e)
                 import traceback
                 traceback.print_exc()
 
-        # 2. 对同一类别的实例进行二次 overlap 检测 (阈值 0.8)
-        # final_instances = []
-        # for q_inst in qualified_instances:
-        #     q_transform = q_inst["obb_transform"]
-        #     q_extents = q_inst["obb_extents"]
-            
-        #     merged = False
-        #     for f_idx, f_inst in enumerate(final_instances):
-        #         # 如果重叠度 > 0.8，则融合
-        #         if obb_overlap(q_transform, q_extents, f_inst["obb_transform"], f_inst["obb_extents"], intersect_ratio=0.8):
-        #             f_inst["points"].extend(q_inst["points"])
-        #             f_inst["images"] |= q_inst["images"]
-        #             # 合并 mask 编码
-        #             if "mask_encodings" not in f_inst:
-        #                 f_inst["mask_encodings"] = {}
-        #             if "mask_encodings" in q_inst:
-        #                 f_inst["mask_encodings"].update(q_inst["mask_encodings"])
-                    
-        #             # 重新计算融合后的 OBB
-        #             all_pts = np.concatenate(f_inst["points"], axis=0)
-        #             if instance_max_points > 0 and all_pts.shape[0] > instance_max_points:
-        #                 idx = np.random.choice(all_pts.shape[0], instance_max_points, replace=False)
-        #                 all_pts = all_pts[idx]
-        #             f_inst["obb_transform"], f_inst["obb_extents"] = compute_obb(all_pts)
-        #             merged = True
-        #             break
-            
-        #     if not merged:
-        #         final_instances.append(q_inst)
-        final_instances = qualified_instances 
-        logging.info("标签 %s 最终过滤与vlm召回后剩余 %d 个实例", label, len(qualified_instances))
+        # 2. 对同一类别的轨迹做迭代式二次融合。每次只融合当前
+        # overlap 最大且帧集合不冲突的一对，重算 OBB 后继续直至收敛。
+        final_instances = iterative_merge_instance_tracks(
+            qualified_instances,
+            instance_max_points,
+        )
+        logging.info(
+            "标签 %s 过滤后 %d 个实例，迭代式二次融合后剩余 %d 个实例",
+            label,
+            len(qualified_instances),
+            len(final_instances),
+        )
 
         # 3. 记录最终结果
         for inst in final_instances:
@@ -1496,6 +1744,27 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model-path", "-m", type=Path, default=DEFAULT_GS_MODEL, help="3DGS 模型目录（含 cfg_args）")
     parser.add_argument("--iteration", type=int, default=-1, help="加载的迭代编号，-1 表示自动最新")
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR, help="输出 3D bbox 保存目录")
+    parser.add_argument(
+        "--depth-source",
+        choices=("auto", "gs", "da3", "mesh"),
+        default="mesh",
+        help=(
+            "深度源（默认: mesh，使用 mesh depth 反投影并叠加 GS/mesh 一致性 mask）；"
+            "auto 保持旧 pipeline（ScanNet=GS，ScanNet++/DL3DV=DA3）"
+        ),
+    )
+    parser.add_argument(
+        "--mesh-path",
+        type=Path,
+        default=None,
+        help="mesh 深度模式下的 PLY；默认为 <model-path>/mesh/tsdf_fusion_post.ply",
+    )
+    parser.add_argument(
+        "--mesh-depth-crop-border",
+        type=int,
+        default=32,
+        help="mesh 深度图四周裁掉的像素数（默认: 32）",
+    )
     parser.add_argument("--voxel-size", type=float, default=0.005, help="（保留参数，未使用）")
     parser.add_argument("--min-points", type=int, default=30, help="实例最少点数过滤")
     parser.add_argument("--erode-pixels", type=int, default=15, help="mask 形态学腐蚀像素，过滤边缘")
@@ -1517,6 +1786,12 @@ def parse_args() -> argparse.Namespace:
         # default="cleaning product",
         default=None,
         help="仅导出指定类别的 bbox 到 glb，逗号分隔，空则导出全部",
+    )
+    parser.add_argument(
+        "--process-labels",
+        type=str,
+        default=None,
+        help="仅处理指定类别（逗号分隔）；用于结构面恢复等定向重跑",
     )
     def str_to_bool(v: str) -> bool:
         if isinstance(v, bool):
@@ -1552,7 +1827,17 @@ def parse_args() -> argparse.Namespace:
         "--vllm-api-url",
         type=str,
         default=DEFAULT_VLLM_API_URL,
-        help=f"vLLM 服务的 API 地址（默认: {DEFAULT_VLLM_API_URL}）",
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--gemini-model",
+        default=DEFAULT_GEMINI_MODEL,
+        help=f"Gemini 复核模型（默认: {DEFAULT_GEMINI_MODEL}）",
+    )
+    parser.add_argument(
+        "--api-key-env",
+        default=DEFAULT_API_KEY_ENV,
+        help=f"保存 Vertex AI API key 的环境变量名（默认: {DEFAULT_API_KEY_ENV}）",
     )
     return parser.parse_args()
 
@@ -1585,11 +1870,16 @@ def main() -> None:
         erode_pixels=args.erode_pixels,
         instance_max_points=args.instance_max_points,
         include_labels=set([s for s in args.bbox_labels.split(",") if s.strip()]) if args.bbox_labels else None,
+        process_labels=set([s.strip() for s in args.process_labels.split(",") if s.strip()]) if args.process_labels else None,
         rerun_enabled=args.rerun,
         rerun_addr=args.rerun_addr,
         rerun_save_path=rerun_save_path,
         cam_max_size=args.rerun_cam_max_size,
-        vllm_api_url=args.vllm_api_url,
+        gemini_model=args.gemini_model,
+        api_key_env=args.api_key_env,
+        depth_source=args.depth_source,
+        mesh_path=args.mesh_path,
+        mesh_depth_crop_border=args.mesh_depth_crop_border,
     )
 
 

@@ -95,8 +95,8 @@ class DepthRenderer:
 
 
             H, W = camera_parameters["H"],camera_parameters["W"]
-            znear, zfar = camera_parameters["near"],camera_parameters["far"]
             mvp = camera_parameters["mvp"]
+            view = camera_parameters.get("view")
             faces_world = mesh["faces"]
             verts_world = mesh["verts"]
             dev = self.device
@@ -107,12 +107,23 @@ class DepthRenderer:
             verts_h = torch.cat([verts_world.to(torch.float32), ones], dim=1).contiguous()
             pos_clip = (mvp.to(torch.float32) @ verts_h.T).T.contiguous()[None, ...]  # (1,V,4)
 
+            # rast[..., 2] is post-projection depth, not metric camera Z.
+            # Interpolate camera-space Z as a vertex attribute so nvdiffrast
+            # applies the correct perspective interpolation for each triangle.
+            view_depth = None
+            if linear_depth:
+                if view is None:
+                    raise KeyError(
+                        "camera_parameters must contain 'view' when linear_depth=True"
+                    )
+                pos_view = (view.to(torch.float32) @ verts_h.T).T
+                # Visible geometry has negative Z in the OpenGL view frame;
+                # downstream back-projection expects positive z-depth.
+                view_depth = (-pos_view[:, 2]).contiguous()[None, :, None]
+
             # 全局深度初始化为 +inf，mask 初始化为 False
             depth_global = torch.full((H, W), float("inf"), dtype=torch.float32, device=dev)
             mask_global  = torch.zeros((H, W), dtype=torch.bool, device=dev)
-
-            n = torch.tensor(znear, device=dev, dtype=torch.float32)
-            f = torch.tensor(zfar,  device=dev, dtype=torch.float32)
 
             F = faces_world.shape[0]
             num_chunks = math.ceil(F / max_tris_per_pass)
@@ -130,13 +141,11 @@ class DepthRenderer:
                     if verbose: print(f"[chunk {ci+1}/{num_chunks}] no hits")
                     continue
 
-                z_over_w = rast[0, :, :, 2].clamp(-1.0, 1.0)
                 if linear_depth:
-                    # NDC -> 线性视空间深度（正距离）
-                    z_over_w = (2.0 * n * f) / (f + n - z_over_w * (f - n))
-                    depth_lin = (z_over_w)  # 正
+                    depth_interp, _ = dr.interpolate(view_depth, rast, tri_chunk)
+                    depth_lin = depth_interp[0, :, :, 0]
                 else:
-                    depth_lin = (z_over_w)  # 正
+                    depth_lin = rast[0, :, :, 2].clamp(-1.0, 1.0)
 
                 # 将未命中的像素置为 +inf，便于做逐像素最小
                 depth_lin = torch.where(hit, depth_lin, torch.full_like(depth_lin, float("inf")))
@@ -146,7 +155,9 @@ class DepthRenderer:
                 mask_global  = mask_global | hit
 
                 # 可选：清理临时张量以减小峰值显存
-                del rast, tri_id, hit, z_over_w, depth_lin
+                del rast, tri_id, hit, depth_lin
+                if linear_depth:
+                    del depth_interp
                 torch.cuda.synchronize()
 
             # 对没有命中的像素，depth 仍是 inf；保持 mask 返回即可
@@ -171,7 +182,7 @@ def Build_Ply_Render_Camera_Parameters_default(device):
     t = torch.tensor([0.0, 0.0, -5.0], dtype=torch.float32, device=device)
     view = world_to_view_rt(R, t, device=torch.device(device))
     mvp = compose_mvp(proj, view)
-    return {"mvp":mvp,"far":zfar,"near":znear,"H":H,"W":W}
+    return {"mvp":mvp,"view":view,"far":zfar,"near":znear,"H":H,"W":W}
 
 def Build_Ply_Render_Camera_Parameters_colmap(fx, fy, cx, cy, W, H, znear, zfar,R,T, device):
     # H, W = 720, 1280
@@ -184,7 +195,7 @@ def Build_Ply_Render_Camera_Parameters_colmap(fx, fy, cx, cy, W, H, znear, zfar,
     t = T
     view = world_to_view_rt(R, t, device=torch.device(device))
     mvp = compose_mvp(proj, view)
-    return {"mvp":mvp,"far":zfar,"near":znear,"H":H,"W":W}
+    return {"mvp":mvp,"view":view,"far":zfar,"near":znear,"H":H,"W":W}
 
 
 # def Build_Ply_Render_Camera_Parameters_colmap(
@@ -230,8 +241,13 @@ def Build_Ply_Render_Camera_Parameters_colmap_correct(
 ):
     device = torch.device(device)
 
-    # 1) 投影矩阵（保持你原来的）
-    proj = opengl_proj_from_intrinsics(fx, fy, cx, cy, W, H, znear, zfar, device=device)
+    # nvdiffrast evaluates pixels at (x + 0.5, y + 0.5), while the
+    # downstream camera model addresses pixel centers using integer
+    # coordinates.  Shift the render principal point so depth[y, x] and the
+    # back-projected ray use the same convention.
+    proj = opengl_proj_from_intrinsics(
+        fx, fy, cx + 0.5, cy + 0.5, W, H, znear, zfar, device=device
+    )
 
     # 2) 直接使用 COLMAP 的 world->camera 外参：x_cam = R x_world + T
     R = torch.as_tensor(R, dtype=torch.float32, device=device)        # (3,3)
@@ -250,7 +266,14 @@ def Build_Ply_Render_Camera_Parameters_colmap_correct(
     # 5) mvp
     mvp = compose_mvp(proj, view)
 
-    return {"mvp": mvp, "far": zfar, "near": znear, "H": H, "W": W}
+    return {
+        "mvp": mvp,
+        "view": view,
+        "far": zfar,
+        "near": znear,
+        "H": H,
+        "W": W,
+    }
 
 
 
